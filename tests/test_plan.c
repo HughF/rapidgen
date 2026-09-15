@@ -182,7 +182,7 @@ static bool plan_drawing(const RgJob *j, const char *entities, RgPlan *pl)
 {
     char text[4096];
     snprintf(text, sizeof text, "0\nSECTION\n2\nENTITIES\n%s0\nENDSEC\n0\nEOF\n", entities);
-    RgDxfOptions opt = { j->chord_tolerance, NULL };
+    RgDxfOptions opt = { j->chord_tolerance, NULL, false };
     RgDrawing d;
     RgShape s;
     CHECK(rg_dxf_read(text, strlen(text), &opt, &d, err, sizeof err));
@@ -302,9 +302,117 @@ static void test_robot_rules(void)
     rg_plan_free(&pl);
 }
 
+static void flat_with(RgJob *j, const char *extra)
+{
+    char text[8192];
+    snprintf(text, sizeof text, "%s\n%s\n", rg_job_template_flat(), extra);
+    rg_job_default(j);
+    bool ok = rg_job_parse(j, text, err, sizeof err) && rg_job_validate(j, err, sizeof err);
+    if (!ok)
+        printf("  job did not parse: %s\n", err);
+    CHECK(ok);
+}
+
+static void test_flat(void)
+{
+    RgJob j;
+    RgPlan pl;
+    flat_with(&j, "");
+    bool ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+
+    /* home; stroke 1: approach, down, 3 spray, up; stroke 2: approach, down, 1, up; home */
+    CHECK(pl.nmoves == 12);
+    if (pl.nmoves == 12) {
+        CHECK(pl.moves[1].kind == RG_MV_JOINT && pl.moves[1].group == 0);
+        CHECK_NEAR(pl.moves[1].tcp.pos.z, 300.0, 1e-9);           /* standoff + approach */
+        CHECK_NEAR(pl.moves[2].tcp.pos.z, 200.0, 1e-9);
+        CHECK(pl.moves[2].after == RG_ACT_READY);
+        CHECK(pl.moves[3].zone == RG_Z_SMALL && pl.moves[4].zone == RG_Z_SMALL);
+        CHECK(pl.moves[5].zone == RG_Z_FINE && pl.moves[5].after == RG_ACT_GUN_OFF);
+        CHECK_NEAR(pl.moves[5].tcp.pos.x, 50.0, 1e-9);
+        CHECK_NEAR(pl.moves[5].tcp.pos.y, 130.0, 1e-9);
+        CHECK(pl.moves[8].after == RG_ACT_GUN_ON);
+        CHECK(pl.moves[9].after == RG_ACT_GUN_OFF);
+        CHECK_NEAR(pl.moves[3].tcp.rot.m[2][2], -1.0, 1e-12);     /* gun into the part */
+    }
+    check_moves_consistent(&j, &pl);
+    CHECK_NEAR(pl.stroke_length, 1580.0, 1e-9);
+    CHECK_NEAR(pl.spray_time, 1580.0 / 300.0, 1e-9);
+    CHECK(pl.sharp_corners == 2);
+    CHECK(has_issue(&pl, RG_NOTE, "more than 45 deg at 2 points"));
+    /* The fan lies along Y, so the 80 mm side of stroke 1 runs along it. */
+    CHECK_NEAR(pl.along_fan_length, 80.0, 1e-9);
+    CHECK(has_issue(&pl, RG_WARN, "80 mm of the 1580 mm painted (5 %) runs within 30 deg"));
+    CHECK_NEAR(pl.moves[3].tcp.rot.m[0][0], 0.0, 1e-12);      /* tool X along drawing Y */
+    CHECK_NEAR(pl.moves[3].tcp.rot.m[1][0], 1.0, 1e-12);
+    CHECK(pl.min_clearance >= j.clearance);
+    CHECK_NEAR(pl.min_clearance, 200.0, 1e-6);                     /* the gun tip, at the standoff */
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Without a gun signal, two strokes are refused and one is warned about. */
+    flat_with(&j, "");
+    j.gun_signal[0] = '\0';
+    CHECK(!rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_REFUSE, "there are 2 strokes, and without gun_signal"));
+    rg_plan_free(&pl);
+    rg_job_delete_stroke(&j, 1);
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_WARN, "heavy spot"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    flat_with(&j, "plane = 2600 -300 200");
+    CHECK(!rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_REFUSE, "at the approach to stroke 1, above (50.0, 50.0)"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Turn the fan along X, with the gun mounted to match, and it is the long
+     * runs that suffer instead. */
+    flat_with(&j, "fan_along = 0\ntool_rot = 0.866025 0.5 0 0");
+    ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+    CHECK_NEAR(pl.along_fan_length, 1500.0, 1e-9);
+    CHECK(has_issue(&pl, RG_WARN, "1500 mm of the 1580 mm painted (95 %)"));
+    CHECK_NEAR(pl.moves[3].tcp.rot.m[0][0], 1.0, 1e-12);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Turning the fan without turning the gun on its mount turns the wrist
+     * with it, and here that lands on the wrist singularity. */
+    flat_with(&j, "fan_along = 0");
+    CHECK(!rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_REFUSE, "axis 5 comes within"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    flat_with(&j, "spray_speed = 900");
+    CHECK(!rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_REFUSE, "spray_speed 900 mm/s is above max_spray_speed 500"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* A standoff under the clearance puts the gun tip too close: first on the
+     * way down into stroke 1, and at worst the standoff itself. */
+    flat_with(&j, "standoff = 30");
+    CHECK(!rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_REFUSE, "the gun tip comes within 45 mm of the part surface in "
+                                    "stroke 1 at (50.0, 50.0) (clearance 50 mm)"));
+    CHECK_NEAR(pl.min_clearance, 30.0, 1e-6);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_plan",
     test_template_plan();
     test_bands();
     test_drawings();
     test_robot_rules();
+    test_flat();
 )

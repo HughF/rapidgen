@@ -508,6 +508,9 @@ static bool read_entities(Ctx *c)
             ok = do_lwpolyline(c, &e);
         } else if (is_annotation(t)) {
             c->out->skipped++;
+        } else if (c->opt->lenient) {
+            if (!c->out->unsupported++)
+                rg_copy(c->out->unsupported_kind, sizeof c->out->unsupported_kind, t);
         } else {
             ok = fail(c, "line %d: the drawing has a %s on layer %s, which rapidgen "
                          "cannot read: %s", e.line, t, e.layer, advice_for(t));
@@ -638,6 +641,42 @@ bool rg_dxf_load(const char *path, const RgDxfOptions *opt, RgDrawing *out,
         snprintf(err, errcap, "%s: %s", path, why);
     free(text);
     return ok;
+}
+
+void rg_drawing_scale(RgDrawing *d, double s)
+{
+    for (int i = 0; i < d->n; i++)
+        for (int j = 0; j < d->paths[i].n; j++) {
+            d->paths[i].pts[j].x *= s;
+            d->paths[i].pts[j].y *= s;
+        }
+}
+
+bool rg_drawing_copy(RgDrawing *dst, const RgDrawing *src)
+{
+    *dst = *src;
+    dst->paths = NULL;
+    dst->n = dst->cap = 0;
+    if (src->n == 0)
+        return true;
+    dst->paths = calloc((size_t)src->n, sizeof *dst->paths);
+    if (!dst->paths)
+        return false;
+    dst->cap = src->n;
+    for (int i = 0; i < src->n; i++) {
+        RgPath *p = &dst->paths[i];
+        *p = src->paths[i];
+        p->pts = malloc((size_t)(src->paths[i].n ? src->paths[i].n : 1) * sizeof *p->pts);
+        if (!p->pts) {
+            dst->n = i;
+            rg_drawing_free(dst);
+            return false;
+        }
+        memcpy(p->pts, src->paths[i].pts, (size_t)src->paths[i].n * sizeof *p->pts);
+        p->cap = p->n;
+        dst->n = i + 1;
+    }
+    return true;
 }
 
 void rg_drawing_free(RgDrawing *d)

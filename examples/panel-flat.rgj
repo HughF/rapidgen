@@ -1,0 +1,37 @@
+# rapidgen example: a flat panel, sprayed along painted strokes.
+#
+# panel.dxf is the part: 500 x 300 mm with a 100 x 60 window in the middle,
+# a centre line that closes nothing, and a title. The strokes below were
+# painted over it in the editor: once round the outline, inset 40 mm, then
+# two passes across the top. The drawing is only the reference the strokes
+# were traced over; the program is made from the strokes.
+
+name          = PANEL02
+controller    = s4c_plus
+robot         = irb2400_16
+part          = flat
+drawing       = panel.dxf
+drawing_scale = 1
+
+plane         = 800 -300 200
+plane_rot     = 1 0 0 0
+spray_speed   = 300
+
+fan_width     = 80
+overlap       = 50
+standoff      = 200
+approach      = 100
+
+tool          = tSprayGun
+tool_define   = no
+tool_tcp      = 0 -120 180
+# Tilted 60 deg off the flange axis, and turned 90 deg about its own axis so
+# the fan lies across the passes without turning the wrist into its singularity.
+tool_rot      = 0.612372 0.353553 -0.353553 0.612372
+
+home          = 0 0 0 0 30 0
+ready_prompt  = yes
+gun_signal    = doGunOn
+
+stroke = 40 40  460 40  460 260  40 260  40 40
+stroke = 60 80  440 80  440 110  60 110

@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# AppImage entry point.
+#
+# The bundled libraries go on the front of the search path so the SDL2 built
+# alongside this binary is the one that loads. Everything the host is entitled
+# to own — the graphics driver, X11, Wayland, ALSA and PulseAudio — is left to
+# the host, which is why they are not in usr/lib: bundling a graphics stack is
+# how an AppImage ends up slower than the program it replaced, or refusing to
+# start on the machine it was meant to rescue.
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$HERE/usr/bin/rapidgen" "$@"

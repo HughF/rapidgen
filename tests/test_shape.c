@@ -20,7 +20,7 @@ static bool shape_of(const char *entities, RgShape *s)
 {
     char text[8192];
     snprintf(text, sizeof text, "0\nSECTION\n2\nENTITIES\n%s0\nENDSEC\n0\nEOF\n", entities);
-    RgDxfOptions opt = { 0.2, NULL };
+    RgDxfOptions opt = { 0.2, NULL, false };
     RgDrawing d;
     err[0] = '\0';
     if (!rg_dxf_read(text, strlen(text), &opt, &d, err, sizeof err))

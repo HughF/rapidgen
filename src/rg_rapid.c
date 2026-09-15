@@ -36,7 +36,6 @@ static const RgDialect dialects[] = {
 
 #define N_DIALECTS ((int)(sizeof dialects / sizeof dialects[0]))
 
-#define WOBJ_NAME   "wRgCylinder"
 #define HOME_JOINTS "jRgHome"
 #define HOME_TARGET "pRgHome"
 #define MAX_TARGETS 9999
@@ -188,16 +187,25 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
 
     char a[256], q[96], n1[32], n2[32], n3[32];
     const char *tool = j->tool;
+    const char *wobj = j->part == RG_PART_FLAT ? "wRgPart" : "wRgCylinder";
 
     rg_buf_puts(out, "%%%\n  VERSION:1\n  LANGUAGE:ENGLISH\n%%%\n\n");
     rg_buf_printf(out, "MODULE %s\n", j->name);
     rg_buf_printf(out, "  ! Written by %s %s for an ABB %s\n", RAPIDGEN_NAME, RAPIDGEN_VERSION, d->name);
     rg_buf_printf(out, "  ! From %s, %s\n", source, stamp);
-    rg_buf_printf(out, "  ! Cylinder radius %s mm on a rotator at %s rpm\n",
-                  rg_fmt(n1, sizeof n1, j->radius, 1), rg_fmt(n2, sizeof n2, j->rpm, 1));
-    rg_buf_printf(out, "  ! Fan %s mm at %s mm standoff, pitch %s mm per turn\n",
-                  rg_fmt(n1, sizeof n1, j->fan_width, 1), rg_fmt(n2, sizeof n2, j->standoff, 1),
-                  rg_fmt(n3, sizeof n3, pl->pitch, 1));
+    if (j->part == RG_PART_FLAT) {
+        rg_buf_printf(out, "  ! Flat part: %d stroke%s, %s mm at %s mm/s\n", j->nstrokes,
+                      j->nstrokes == 1 ? "" : "s", rg_fmt(n1, sizeof n1, pl->stroke_length, 0),
+                      rg_fmt(n2, sizeof n2, pl->spray_speed, 1));
+        rg_buf_printf(out, "  ! Fan %s mm at %s mm standoff\n",
+                      rg_fmt(n1, sizeof n1, j->fan_width, 1), rg_fmt(n2, sizeof n2, j->standoff, 1));
+    } else {
+        rg_buf_printf(out, "  ! Cylinder radius %s mm on a rotator at %s rpm\n",
+                      rg_fmt(n1, sizeof n1, j->radius, 1), rg_fmt(n2, sizeof n2, j->rpm, 1));
+        rg_buf_printf(out, "  ! Fan %s mm at %s mm standoff, pitch %s mm per turn\n",
+                      rg_fmt(n1, sizeof n1, j->fan_width, 1), rg_fmt(n2, sizeof n2, j->standoff, 1),
+                      rg_fmt(n3, sizeof n3, pl->pitch, 1));
+    }
     rg_buf_puts(out, "  ! Not proven on a robot. Check it in simulation, then step\n"
                      "  ! through in manual reduced speed before running it.\n");
 
@@ -212,7 +220,8 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     RgPose w = rg_job_wobj(j);
     vec_text(a, sizeof a, w.pos, 2);
     quat_text(q, sizeof q, rg_quat_from_m3(w.rot));
-    rg_buf_printf(out, "  PERS wobjdata " WOBJ_NAME ":=[FALSE,TRUE,\"\",[%s,%s],[[0,0,0],[1,0,0,0]]];\n", a, q);
+    rg_buf_printf(out, "  PERS wobjdata %s:=[FALSE,TRUE,\"\",[%s,%s],[[0,0,0],[1,0,0,0]]];\n",
+                  wobj, a, q);
 
     speeddata(out, "vRgSpray", pl->spray_speed);
     speeddata(out, "vRgApproach", j->approach_speed);
@@ -242,7 +251,7 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
 
     for (int i = 0; i < pl->nmoves; i++) {
         const RgMove *m = &pl->moves[i];
-        const char *zone = m->fine ? "fine" : "z10";
+        const char *zone = m->zone == RG_Z_FINE ? "fine" : m->zone == RG_Z_SMALL ? "z1" : "z10";
         if (m->note[0])
             rg_buf_printf(out, "    ! %s\n", m->note);
         switch (m->kind) {
@@ -251,15 +260,15 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
                 rg_buf_printf(out, "    MoveAbsJ " HOME_JOINTS ",%s,fine,%s;\n",
                               speed_name(m->speed), tool);
             } else {
-                rg_buf_printf(out, "    ConfJ \\On;\n    MoveJ " HOME_TARGET ",%s,fine,%s\\WObj:="
-                              WOBJ_NAME ";\n    ConfJ \\Off;\n", speed_name(m->speed), tool);
+                rg_buf_printf(out, "    ConfJ \\On;\n    MoveJ " HOME_TARGET ",%s,fine,%s\\WObj:=%s;\n"
+                              "    ConfJ \\Off;\n", speed_name(m->speed), tool, wobj);
             }
             break;
         case RG_MV_JOINT:
         case RG_MV_LINEAR:
-            rg_buf_printf(out, "    %s pRg%04d,%s,%s,%s\\WObj:=" WOBJ_NAME ";\n",
+            rg_buf_printf(out, "    %s pRg%04d,%s,%s,%s\\WObj:=%s;\n",
                           m->kind == RG_MV_JOINT ? "MoveJ" : "MoveL", index[i] + 1,
-                          speed_name(m->speed), zone, tool);
+                          speed_name(m->speed), zone, tool, wobj);
             break;
         }
         switch (m->after) {

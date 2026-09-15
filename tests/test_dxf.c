@@ -18,7 +18,7 @@ static char err[512];
 
 static bool read_dxf(const char *text, const char *layer, RgDrawing *d)
 {
-    RgDxfOptions opt = { 0.2, layer };
+    RgDxfOptions opt = { 0.2, layer, false };
     err[0] = '\0';
     return rg_dxf_read(text, strlen(text), &opt, d, err, sizeof err);
 }

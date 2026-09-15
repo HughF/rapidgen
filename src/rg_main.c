@@ -11,8 +11,9 @@
  * See the GNU General Public License in LICENSE for details.
  */
 /*
- * rg_main.c — the command line.
+ * rg_main.c — the command line, and starting the editor.
  *
+ *   rapidgen                        open the editor on the last job
  *   rapidgen JOB.rgj [--out DIR] [--check]
  *   rapidgen --template
  *   rapidgen --fk ROBOT J1 J2 J3 J4 J5 J6
@@ -22,11 +23,17 @@
  * Exit status: 0 program written (or --check passed), 1 bad input or I/O,
  * 2 the plan was refused.
  */
+#include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "plat.h"
+#include "rg_ui.h"
 #include "rg_dxf.h"
 #include "rg_job.h"
 #include "rg_plan.h"
@@ -37,15 +44,30 @@
 #include "rg_text.h"
 #include "rg_version.h"
 
+/* A -mwindows program has no console; reattach to the one it was started
+ * from, so the command-line options can print. */
+static void console(void)
+{
+#ifdef _WIN32
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#endif
+}
+
 static void usage(FILE *f)
 {
     fprintf(f,
         "%s %s - %s\n\n"
+        "  rapidgen                   open the editor on the last job\n"
+        "  rapidgen --gui [JOB.rgj]   open the editor\n"
         "  rapidgen JOB.rgj [--out DIR] [--check]\n"
         "        plan the job, check it through the robot's kinematics, and write\n"
         "        NAME.PRG and NAME.txt (the report) to DIR, default beside the job.\n"
         "        --check writes nothing and prints the report.\n"
-        "  rapidgen --template        print a commented job file to start from\n"
+        "  rapidgen --template [flat] print a commented job file to start from:\n"
+        "                             a cylinder, or a flat part with strokes\n"
         "  rapidgen --fk ROBOT J1..J6 tool0 position and orientation for joint angles\n"
         "  rapidgen --ik ROBOT X Y Z Q1 Q2 Q3 Q4\n"
         "                             every joint solution for a tool0 pose\n"
@@ -143,6 +165,7 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
     if (!rg_job_load(&job, job_path, err, sizeof err) ||
         !rg_job_validate(&job, err, sizeof err)) {
         fprintf(stderr, "rapidgen: %s\n", err);
+        rg_job_free(&job);
         return 1;
     }
 
@@ -158,7 +181,8 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
     RgShape shape = { 0 };
     bool have_shape = false;
 
-    if (job.drawing[0]) {
+    /* A flat part's drawing is only what its strokes were painted over. */
+    if (job.drawing[0] && job.part == RG_PART_CYLINDER) {
         char path[PLAT_PATH_MAX];
         bool absolute = job.drawing[0] == '/' || job.drawing[0] == '\\' ||
                         (job.drawing[0] && job.drawing[1] == ':');
@@ -166,17 +190,27 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
             rg_copy(path, sizeof path, job.drawing);
         else if (!plat_path_join(path, sizeof path, job_dir, job.drawing)) {
             fprintf(stderr, "rapidgen: the drawing's path is too long\n");
+            rg_job_free(&job);
             return 1;
         }
-        RgDxfOptions opt = { job.chord_tolerance, job.layer };
-        if (!rg_dxf_load(path, &opt, &drawing, err, sizeof err) ||
-            !rg_shape_build(&drawing, job.join_tolerance, &shape, err, sizeof err)) {
+        RgDxfOptions opt = { job.chord_tolerance, job.layer, false };
+        if (!rg_dxf_load(path, &opt, &drawing, err, sizeof err)) {
             fprintf(stderr, "rapidgen: %s\n", err);
+            rg_job_free(&job);
+            return 1;
+        }
+        rg_drawing_scale(&drawing, job.drawing_scale);
+        if (!rg_shape_build(&drawing, job.join_tolerance, &shape, err, sizeof err)) {
+            fprintf(stderr, "rapidgen: %s: %s\n", job.drawing, err);
             rg_drawing_free(&drawing);
+            rg_job_free(&job);
             return 1;
         }
         have_shape = true;
         snprintf(source, sizeof source, "%s", plat_path_leaf(job.drawing));
+    } else if (job.drawing[0]) {
+        snprintf(source, sizeof source, "%.200s, painted over %.200s", plat_path_leaf(job_path),
+                 plat_path_leaf(job.drawing));
     } else {
         snprintf(source, sizeof source, "%s", plat_path_leaf(job_path));
     }
@@ -238,15 +272,88 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
     rg_buf_free(&report);
     rg_buf_free(&text);
     rg_plan_free(&plan);
+    rg_job_free(&job);
     return status;
+}
+
+#define BASE_W 1500
+#define BASE_H 940
+
+static int run_gui(const char *job)
+{
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+        console();
+        fprintf(stderr, "rapidgen: SDL_Init: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
+
+    SDL_Window *win = SDL_CreateWindow(RAPIDGEN_NAME " " RAPIDGEN_VERSION,
+                                       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                       BASE_W, BASE_H,
+                                       SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE |
+                                       SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Renderer *ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED |
+                                                 SDL_RENDERER_PRESENTVSYNC) : NULL;
+    if (win && !ren)
+        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+    if (!win || !ren) {
+        console();
+        fprintf(stderr, "rapidgen: cannot open a window: %s\n", SDL_GetError());
+        if (win)
+            SDL_DestroyWindow(win);
+        SDL_Quit();
+        return 1;
+    }
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+    RgUi *ui = rg_ui_create(win, ren, job);
+    if (!ui) {
+        console();
+        fprintf(stderr, "rapidgen: cannot start the editor\n");
+        SDL_DestroyRenderer(ren);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return 1;
+    }
+    rg_ui_fit_window(ui, BASE_W, BASE_H);
+    SDL_ShowWindow(win);
+
+    while (!rg_ui_quit_requested(ui)) {
+        SDL_Event e;
+        rg_ui_input_begin(ui);
+        /* Nothing moves on its own, so sleep until the operator does
+         * something — unless a check is due in a moment. */
+        bool got = rg_ui_busy(ui) ? SDL_PollEvent(&e) != 0
+                                  : SDL_WaitEventTimeout(&e, 200) != 0;
+        if (got) {
+            rg_ui_handle_event(ui, &e);
+            while (SDL_PollEvent(&e))
+                rg_ui_handle_event(ui, &e);
+        }
+        rg_ui_input_end(ui);
+
+        int w = 0, h = 0;
+        rg_ui_output_size(ui, &w, &h);
+        rg_ui_frame(ui, w, h);
+        rg_ui_present(ui);
+    }
+
+    rg_ui_destroy(ui);
+    SDL_DestroyRenderer(ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        usage(stderr);
-        return 1;
-    }
+    if (argc < 2)
+        return run_gui(NULL);
+    if (strcmp(argv[1], "--gui") == 0)
+        return run_gui(argc > 2 ? argv[2] : NULL);
+
+    console();
     const char *a = argv[1];
     if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
         usage(stdout);
@@ -257,7 +364,8 @@ int main(int argc, char **argv)
         return 0;
     }
     if (strcmp(a, "--template") == 0) {
-        fputs(rg_job_template(), stdout);
+        bool flat = argc > 2 && strcmp(argv[2], "flat") == 0;
+        fputs(flat ? rg_job_template_flat() : rg_job_template(), stdout);
         return 0;
     }
     if (strcmp(a, "--robots") == 0) {

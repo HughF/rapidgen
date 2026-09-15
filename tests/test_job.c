@@ -137,10 +137,103 @@ static void test_identifiers(void)
     CHECK(!rg_rapid_ident_ok("", 16));
 }
 
+/* Writing a job and reading it back gives the same job, byte for byte. */
+static void round_trip(const char *text)
+{
+    RgJob a, b;
+    rg_job_default(&a);
+    rg_job_default(&b);
+    CHECK(rg_job_parse(&a, text, err, sizeof err));
+    RgBuf wa, wb;
+    rg_buf_init(&wa);
+    rg_buf_init(&wb);
+    rg_job_write(&a, &wa);
+    CHECK(rg_job_parse(&b, wa.s, err, sizeof err));
+    rg_job_write(&b, &wb);
+    CHECK(wa.len == wb.len && memcmp(wa.s, wb.s, wa.len) == 0);
+    CHECK(rg_job_validate(&b, err, sizeof err));
+    CHECK(a.nstrokes == b.nstrokes);
+    CHECK(a.nbands == b.nbands);
+    rg_buf_free(&wa);
+    rg_buf_free(&wb);
+    rg_job_free(&a);
+    rg_job_free(&b);
+}
+
+static void test_flat(void)
+{
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, rg_job_template_flat(), err, sizeof err));
+    CHECK(rg_job_validate(&j, err, sizeof err));
+    CHECK(j.part == RG_PART_FLAT);
+    CHECK(j.nstrokes == 2);
+    CHECK(j.strokes[0].n == 4);
+    CHECK_NEAR(j.strokes[0].pts[2].x, 550, 0);
+    CHECK_NEAR(j.strokes[0].pts[2].y, 130, 0);
+    CHECK_NEAR(j.spray_speed, 300, 0);
+
+    RgPose w = rg_job_wobj(&j);
+    CHECK_NEAR(w.pos.x, 800, 0);
+    CHECK_NEAR(w.rot.m[0][0], 1, 1e-12);
+
+    RgJob copy;
+    CHECK(rg_job_copy(&copy, &j));
+    rg_job_delete_stroke(&copy, 0);
+    CHECK(copy.nstrokes == 1 && copy.strokes[0].n == 2);
+    CHECK(j.nstrokes == 2 && j.strokes[0].n == 4);     /* the original is untouched */
+    rg_job_delete_stroke(&copy, 0);
+    CHECK(!rg_job_validate(&copy, err, sizeof err));
+    CHECK(strstr(err, "no strokes") != NULL);
+    rg_job_free(&copy);
+    rg_job_free(&j);
+
+    rg_job_default(&j);
+    CHECK(!rg_job_parse(&j, "stroke = 1 2 3\n", err, sizeof err));
+    CHECK(strstr(err, "x y pairs") != NULL);
+    CHECK(!rg_job_parse(&j, "stroke = 1 2\n", err, sizeof err));
+    CHECK(!rg_job_parse(&j, "part = sphere\n", err, sizeof err));
+    rg_job_free(&j);
+
+    /* Strokes belong to flat parts, bands to cylinders. */
+    char text[8192];
+    snprintf(text, sizeof text, "%s\nstroke = 0 0 10 10\n", rg_job_template());
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err));
+    CHECK(!rg_job_validate(&j, err, sizeof err));
+    CHECK(strstr(err, "strokes are for flat parts") != NULL);
+    rg_job_free(&j);
+    snprintf(text, sizeof text, "%s\nband = 0 10\n", rg_job_template_flat());
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err));
+    CHECK(!rg_job_validate(&j, err, sizeof err));
+    CHECK(strstr(err, "bands are for cylinders") != NULL);
+    rg_job_free(&j);
+
+    /* A long freehand stroke is one long line. */
+    RgBuf big;
+    rg_buf_init(&big);
+    rg_buf_puts(&big, rg_job_template_flat());
+    rg_buf_puts(&big, "stroke =");
+    for (int i = 0; i < 3000; i++)
+        rg_buf_printf(&big, " %d.125 %d.5", i, i % 97);
+    rg_buf_puts(&big, "\n");
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, big.s, err, sizeof err));
+    CHECK(j.nstrokes == 3 && j.strokes[2].n == 3000);
+    CHECK_NEAR(j.strokes[2].pts[2999].x, 2999.125, 1e-9);
+    rg_buf_free(&big);
+    rg_job_free(&j);
+
+    round_trip(rg_job_template());
+    round_trip(rg_job_template_flat());
+}
+
 TEST_MAIN("test_job",
     test_template();
     test_errors();
     test_required();
     test_frames();
     test_identifiers();
+    test_flat();
 )

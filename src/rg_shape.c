@@ -28,7 +28,7 @@ static double dist(RgPt a, RgPt b)
     return hypot(a.x - b.x, a.y - b.y);
 }
 
-/* ---- joining open pieces ------------------------------------------- */
+/* ---- building ------------------------------------------------------- */
 
 typedef struct {
     RgPt *pts;
@@ -49,32 +49,54 @@ static bool chain_add(Chain *c, RgPt p)
     return true;
 }
 
-static bool add_loop(RgShape *s, int *cap, RgPt *pts, int n, const char *layer,
-                     double tol, char *err, size_t errcap)
+typedef struct {
+    const RgDrawing *d;
+    double   tol;
+    bool     lenient;
+    int      skipped;
+    RgShape *s;
+    int      cap;
+    char    *err;
+    size_t   errcap;
+} Build;
+
+static bool oom(Build *b)
+{
+    snprintf(b->err, b->errcap, "out of memory");
+    return false;
+}
+
+/* Takes ownership of pts. */
+static bool take_loop(Build *b, RgPt *pts, int n, const char *layer)
 {
     /* Drop a closing point that repeats the first, and repeated points. */
     int m = 0;
     for (int i = 0; i < n; i++)
         if (m == 0 || dist(pts[i], pts[m - 1]) > 1e-9)
             pts[m++] = pts[i];
-    while (m > 1 && dist(pts[m - 1], pts[0]) <= tol)
+    while (m > 1 && dist(pts[m - 1], pts[0]) <= b->tol)
         m--;
     if (m < 3) {
-        snprintf(err, errcap, "an outline on layer %s near (%.1f, %.1f) has no area",
-                 layer, pts[0].x, pts[0].y);
+        RgPt at = pts[0];
         free(pts);
+        if (b->lenient) {
+            b->skipped++;
+            return true;
+        }
+        snprintf(b->err, b->errcap, "an outline on layer %s near (%.1f, %.1f) has no area",
+                 layer, at.x, at.y);
         return false;
     }
-    if (s->n == *cap) {
-        int nc = *cap ? *cap * 2 : 8;
+    RgShape *s = b->s;
+    if (s->n == b->cap) {
+        int nc = b->cap ? b->cap * 2 : 8;
         RgLoop *l = realloc(s->loops, (size_t)nc * sizeof *l);
         if (!l) {
-            snprintf(err, errcap, "out of memory");
             free(pts);
-            return false;
+            return oom(b);
         }
         s->loops = l;
-        *cap = nc;
+        b->cap = nc;
     }
     RgLoop *l = &s->loops[s->n++];
     memset(l, 0, sizeof *l);
@@ -97,14 +119,12 @@ static RgPt path_end(const RgPath *p, bool last)
     return last ? p->pts[p->n - 1] : p->pts[0];
 }
 
-static bool join_open(const RgDrawing *d, double tol, RgShape *s, int *cap,
-                      char *err, size_t errcap)
+static bool join_open(Build *b)
 {
+    const RgDrawing *d = b->d;
     bool *used = calloc((size_t)(d->n ? d->n : 1), sizeof *used);
-    if (!used) {
-        snprintf(err, errcap, "out of memory");
-        return false;
-    }
+    if (!used)
+        return oom(b);
     bool ok = true;
 
     for (int i = 0; i < d->n && ok; i++) {
@@ -115,7 +135,8 @@ static bool join_open(const RgDrawing *d, double tol, RgShape *s, int *cap,
 
         Chain c = { 0 };
         for (int k = 0; k < first->n && ok; k++)
-            ok = chain_add(&c, first->pts[k]);
+            if (!chain_add(&c, first->pts[k]))
+                ok = oom(b);
 
         while (ok) {
             RgPt end = c.pts[c.n - 1];
@@ -132,27 +153,30 @@ static bool join_open(const RgDrawing *d, double tol, RgShape *s, int *cap,
                 if (ds < best) { best = ds; best_j = j; best_rev = false; }
                 if (de < best) { best = de; best_j = j; best_rev = true; }
             }
-            if (c.n >= 3 && closing <= tol && closing <= best) {
-                ok = add_loop(s, cap, c.pts, c.n, first->layer, tol, err, errcap);
+            if (c.n >= 3 && closing <= b->tol && closing <= best) {
+                ok = take_loop(b, c.pts, c.n, first->layer);
                 c.pts = NULL;
                 break;
             }
-            if (best_j >= 0 && best <= tol) {
+            if (best_j >= 0 && best <= b->tol) {
                 const RgPath *p = &d->paths[best_j];
                 used[best_j] = true;
                 for (int k = 1; k < p->n && ok; k++)
-                    ok = chain_add(&c, p->pts[best_rev ? p->n - 1 - k : k]);
-                if (!ok)
-                    snprintf(err, errcap, "out of memory");
+                    if (!chain_add(&c, p->pts[best_rev ? p->n - 1 - k : k]))
+                        ok = oom(b);
                 continue;
+            }
+            if (b->lenient) {
+                b->skipped++;
+                break;
             }
             double gap = fmin(best, c.n >= 3 ? closing : DBL_MAX);
             if (gap < DBL_MAX)
-                snprintf(err, errcap, "an outline on layer %s is not closed: its end at "
+                snprintf(b->err, b->errcap, "an outline on layer %s is not closed: its end at "
                          "(%.2f, %.2f) is %.2f mm from the nearest other end (joining "
-                         "tolerance %.2f mm)", first->layer, end.x, end.y, gap, tol);
+                         "tolerance %.2f mm)", first->layer, end.x, end.y, gap, b->tol);
             else
-                snprintf(err, errcap, "a %s on layer %s from (%.2f, %.2f) to (%.2f, %.2f) "
+                snprintf(b->err, b->errcap, "a %s on layer %s from (%.2f, %.2f) to (%.2f, %.2f) "
                          "is not part of a closed outline", first->kind, first->layer,
                          c.pts[0].x, c.pts[0].y, end.x, end.y);
             ok = false;
@@ -250,6 +274,8 @@ static bool analyse(RgShape *s, char *err, size_t errcap)
             ok = push_break(s, &bcap, l->pts[k].y);
         }
     }
+    if (!ok)
+        snprintf(err, errcap, "out of memory");
     qsort(e, (size_t)n, sizeof *e, edge_cmp);
 
     for (int i = 0; i < n && ok; i++) {
@@ -291,36 +317,49 @@ static bool analyse(RgShape *s, char *err, size_t errcap)
     return true;
 }
 
-bool rg_shape_build(const RgDrawing *d, double join_tol, RgShape *out, char *err, size_t errcap)
+static bool build(const RgDrawing *d, double join_tol, bool lenient, RgShape *out,
+                  int *skipped, char *err, size_t errcap)
 {
     memset(out, 0, sizeof *out);
-    int cap = 0;
+    Build b = { d, join_tol, lenient, 0, out, 0, err, errcap };
     bool ok = true;
 
     for (int i = 0; i < d->n && ok; i++) {
         const RgPath *p = &d->paths[i];
         if (!p->closed)
             continue;
-        RgPt *pts = malloc((size_t)p->n * sizeof *pts);
+        RgPt *pts = malloc((size_t)(p->n ? p->n : 1) * sizeof *pts);
         if (!pts) {
-            snprintf(err, errcap, "out of memory");
-            ok = false;
+            ok = oom(&b);
             break;
         }
         memcpy(pts, p->pts, (size_t)p->n * sizeof *pts);
-        ok = add_loop(out, &cap, pts, p->n, p->layer, join_tol, err, errcap);
+        ok = take_loop(&b, pts, p->n, p->layer);
     }
     if (ok)
-        ok = join_open(d, join_tol, out, &cap, err, errcap);
-    if (ok && out->n == 0) {
+        ok = join_open(&b);
+    if (ok && out->n == 0 && !lenient) {
         snprintf(err, errcap, "the drawing has no closed outlines");
         ok = false;
     }
-    if (ok)
+    if (ok && !lenient)
         ok = analyse(out, err, errcap);
+    if (skipped)
+        *skipped = b.skipped;
     if (!ok)
         rg_shape_free(out);
     return ok;
+}
+
+bool rg_shape_build(const RgDrawing *d, double join_tol, RgShape *out, char *err, size_t errcap)
+{
+    return build(d, join_tol, false, out, NULL, err, errcap);
+}
+
+bool rg_shape_build_lenient(const RgDrawing *d, double join_tol, RgShape *out, int *skipped)
+{
+    char err[256];
+    return build(d, join_tol, true, out, skipped, err, sizeof err);
 }
 
 void rg_shape_free(RgShape *s)
@@ -438,8 +477,12 @@ int rg_shape_runs(const RgShape *s, RgSpanRun **out)
     return n;
 }
 
-static bool inside(const RgLoop *l, RgPt p)
+/* ---- loops ---------------------------------------------------------- */
+
+bool rg_loop_contains(const RgLoop *l, RgPt p)
 {
+    if (p.x < l->x0 || p.x > l->x1 || p.y < l->y0 || p.y > l->y1)
+        return false;
     bool in = false;
     for (int k = 0, j = l->n - 1; k < l->n; j = k++) {
         RgPt a = l->pts[k], b = l->pts[j];
@@ -448,6 +491,72 @@ static bool inside(const RgLoop *l, RgPt p)
             in = !in;
     }
     return in;
+}
+
+double rg_loop_area(const RgLoop *l)
+{
+    double a = 0.0;
+    for (int k = 0; k < l->n; k++) {
+        RgPt p = l->pts[k], q = l->pts[(k + 1) % l->n];
+        a += p.x * q.y - q.x * p.y;
+    }
+    return 0.5 * a;
+}
+
+double rg_loop_nearest(const RgLoop *l, RgPt p, RgPt *on)
+{
+    double best = DBL_MAX;
+    for (int k = 0; k < l->n; k++) {
+        RgPt a = l->pts[k], b = l->pts[(k + 1) % l->n];
+        double dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+        double t = len2 > 0.0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0.0;
+        t = fmax(0.0, fmin(1.0, t));
+        RgPt q = { a.x + t * dx, a.y + t * dy };
+        double d = dist(p, q);
+        if (d < best) {
+            best = d;
+            if (on)
+                *on = q;
+        }
+    }
+    return best;
+}
+
+int rg_shape_loop_at(const RgShape *s, RgPt p)
+{
+    int best = -1;
+    double best_area = DBL_MAX;
+    for (int i = 0; i < s->n; i++) {
+        if (!rg_loop_contains(&s->loops[i], p))
+            continue;
+        double a = fabs(rg_loop_area(&s->loops[i]));
+        if (a < best_area) {
+            best_area = a;
+            best = i;
+        }
+    }
+    return best;
+}
+
+int rg_shape_loop_near(const RgShape *s, RgPt p, double radius, RgPt *on)
+{
+    int best = -1;
+    double best_d = radius;
+    for (int i = 0; i < s->n; i++) {
+        const RgLoop *l = &s->loops[i];
+        if (p.x < l->x0 - radius || p.x > l->x1 + radius ||
+            p.y < l->y0 - radius || p.y > l->y1 + radius)
+            continue;
+        RgPt q;
+        double d = rg_loop_nearest(l, p, &q);
+        if (d <= best_d) {
+            best_d = d;
+            best = i;
+            if (on)
+                *on = q;
+        }
+    }
+    return best;
 }
 
 static bool loops_meet(const RgLoop *a, const RgLoop *b)
@@ -474,7 +583,7 @@ bool rg_shape_find_hole(const RgShape *s, RgPt *at)
             if (i == j || in->x0 < outer->x0 || in->x1 > outer->x1 ||
                 in->y0 < outer->y0 || in->y1 > outer->y1)
                 continue;
-            if (inside(outer, probe) && !loops_meet(in, outer)) {
+            if (rg_loop_contains(outer, probe) && !loops_meet(in, outer)) {
                 *at = probe;
                 return true;
             }

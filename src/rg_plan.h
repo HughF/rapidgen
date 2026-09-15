@@ -19,10 +19,11 @@
  * broken refuses the plan: rapidgen writes no program at all rather than a
  * program with a warning attached. A refusal says where, and by how much.
  *
- * What is checked: the drawing's outlines go all the way round and match
- * the radius; the traverse speed; reach at every sample; joint limits with
- * a margin; the wrist singularity with a margin; a flip mid-move; the wrist
- * centre, flange and gun tip staying clear of the part.
+ * What is checked: reach at every sample; joint limits with a margin; the
+ * wrist singularity with a margin; a flip mid-move; the wrist centre, flange
+ * and gun tip staying clear of the part; the spray speed. For a cylinder,
+ * also that the drawing's outlines go all the way round and match the
+ * radius; for a flat part, that the gun can be switched between strokes.
  *
  * What is NOT checked, and is stated in every report: the gun body and the
  * arm's links against the part, the rotator and the cell; the IRB 2400's
@@ -49,15 +50,18 @@ typedef enum { RG_MV_HOME, RG_MV_JOINT, RG_MV_LINEAR } RgMoveKind;
 typedef enum { RG_SPD_TRAVEL, RG_SPD_APPROACH, RG_SPD_SPRAY } RgSpeedKind;
 typedef enum { RG_ACT_NONE, RG_ACT_READY, RG_ACT_GUN_ON, RG_ACT_GUN_OFF } RgAction;
 
+/* Stop on the point; round it by 1 mm (along a stroke); by 10 mm (in the air). */
+typedef enum { RG_Z_FINE, RG_Z_SMALL, RG_Z_TRAVEL } RgZone;
+
 typedef struct {
     RgMoveKind  kind;
     RgSpeedKind speed;
-    bool        fine;            /* stop on the point; otherwise a small zone */
+    RgZone      zone;
     RgPose      tcp;             /* in the work object                         */
     double      joints[RG_AXES]; /* where the checker expects the arm to be    */
     int         cf[4];
     RgAction    after;           /* done once the arm is there                 */
-    int         band;            /* -1 when not part of a band                 */
+    int         group;           /* the band or stroke; -1 for neither         */
     char        note[80];        /* a comment written before the move          */
 } RgMove;
 
@@ -67,13 +71,16 @@ struct RgPlan {
     bool refused;
 
     /* Derived */
-    double circumference;
-    double pitch;               /* advance per turn of the part            */
-    double spray_speed;         /* traverse, mm/s                          */
-    double runup;               /* distance to reach spray speed           */
-    double overrun;             /* gun centre past each band edge          */
-    double reach_past_edge;     /* furthest the spray lands past an edge   */
-    double spray_time;          /* seconds on the traverses                */
+    double circumference;       /* cylinder                                */
+    double pitch;               /* between passes: fan less overlap        */
+    double spray_speed;         /* mm/s                                    */
+    double runup;               /* cylinder: distance to reach spray speed */
+    double overrun;             /* cylinder: gun centre past each edge     */
+    double reach_past_edge;     /* cylinder: furthest spray lands past an edge */
+    double spray_time;          /* seconds spraying                        */
+    double stroke_length;       /* flat: total painted length              */
+    double along_fan_length;    /* flat: painted along the fan, not across */
+    int    sharp_corners;       /* flat: turns of more than 45 degrees     */
 
     RgBand bands[RG_MAX_BANDS];
     int    nbands;
@@ -98,8 +105,9 @@ struct RgPlan {
     int    home_cf[4];
 };
 
-/* `shape` is NULL when the job gives its bands directly. The plan is filled
- * either way; the result is !refused. */
+/* `shape` is the cylinder's drawing, or NULL when the job gives its bands
+ * directly (and always for a flat part). The plan is filled either way; the
+ * result is !refused. */
 bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *plan);
 void rg_plan_free(RgPlan *plan);
 

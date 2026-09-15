@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=rapidgen
+Comment=ABB S4 spray program generator
+Exec=rapidgen %f
+Icon=rapidgen
+Categories=Development;Engineering;
+Terminal=false

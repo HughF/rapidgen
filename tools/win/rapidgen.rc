@@ -23,6 +23,8 @@
 #endif
 
 
+1 ICON "rapidgen.ico"
+
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "rapidgen.manifest"
 
 VS_VERSION_INFO VERSIONINFO

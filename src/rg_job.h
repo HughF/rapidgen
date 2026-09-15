@@ -16,22 +16,31 @@
  *
  * A job holds inputs only; the program is derived from it every time, so a
  * job file can never disagree with the program it makes. It is also the
- * hand-off point for text prompts: a request written in English is turned
- * into a job file, which a person can read and correct before anything is
- * generated from it.
+ * hand-off point for text prompts and for the editor: a request written in
+ * English, or a pattern painted over a drawing, becomes a job file that a
+ * person can read and correct before anything is generated from it.
  *
- * The process: a cylinder stands on a rotator that turns continuously and
- * independently of the robot. The robot holds the gun square to the outside
- * surface, `standoff` from it, at a fixed position round the part, and
- * traverses it up and down. Because the robot cannot know the part's angle,
- * only full bands round the part can be sprayed.
+ * Two kinds of part:
+ *
+ *   cylinder  The part stands on a rotator that turns continuously and
+ *             independently of the robot. The robot holds the gun square to
+ *             the outside surface, `standoff` from it, at a fixed position
+ *             round the part, and traverses it up and down. Because the robot
+ *             cannot know the part's angle, only full bands round the part
+ *             can be sprayed.
+ *
+ *   flat      The part lies still on a plane. The gun points along the
+ *             plane's normal, `standoff` above it, and follows strokes: paths
+ *             painted in the plane of the drawing.
  *
  * Coordinates:
  *   robot base   ABB base frame: X forward, Z up, origin at the robot's foot.
  *   cylinder     the work object: origin on the rotator axis at table height,
  *                Z up the axis, X pointing horizontally towards the robot.
- *   drawing      the unrolled surface: X round the circumference, Y up the
- *                part from the table, millimetres.
+ *   flat         the work object: origin at the drawing's origin on the part
+ *                surface, X and Y the drawing's axes, Z out of the surface.
+ *   drawing      millimetres after `drawing_scale`. For a cylinder, the
+ *                unrolled surface: X round the circumference, Y up the part.
  *
  * Units: millimetres, degrees, rpm, seconds.
  */
@@ -42,39 +51,59 @@
 #include <stddef.h>
 
 #include "plat.h"
+#include "rg_dxf.h"
+#include "rg_text.h"
 #include "rg_vec.h"
 
 #define RG_JOB_EXT     ".rgj"
 #define RG_MAX_BANDS   32
 #define RG_IDENT_CAP   17      /* S4 RAPID identifiers: 16 characters */
 
+typedef enum { RG_PART_CYLINDER = 0, RG_PART_FLAT, RG_PART_COUNT } RgPartKind;
+
 typedef struct { double y0, y1; } RgBand;
+
+/* A path the gun follows with the spray on, in drawing millimetres. */
+typedef struct {
+    RgPt *pts;
+    int   n;
+} RgStroke;
 
 typedef struct {
     /* What and where */
-    char   name[RG_IDENT_CAP];        /* module and file name              */
-    char   controller[16];            /* dialect id: s4, s4c, s4c_plus     */
-    char   robot[16];                 /* robot id: irb2400_16, irb2400_10  */
-    char   drawing[PLAT_PATH_MAX];    /* DXF, relative to the job file     */
-    char   layer[64];                 /* DXF layer; empty for all          */
-    RgBand bands[RG_MAX_BANDS];       /* ...or the bands written directly  */
-    int    nbands;
+    char       name[RG_IDENT_CAP];        /* module and file name              */
+    char       controller[16];            /* dialect id: s4, s4c, s4c_plus     */
+    char       robot[16];                 /* robot id: irb2400_16, irb2400_10  */
+    RgPartKind part;
+    char       drawing[PLAT_PATH_MAX];    /* DXF, relative to the job file     */
+    char       layer[64];                 /* DXF layer; empty for all          */
+    double     drawing_scale;             /* drawing units to millimetres      */
+    RgBand     bands[RG_MAX_BANDS];       /* cylinder: bands written directly  */
+    int        nbands;
 
-    /* The part and the cell */
+    /* A cylinder and its cell */
     double radius;                    /* sprayed surface                   */
     double part_height;               /* table to top of part              */
     RgVec3 axis;                      /* rotator axis at table height, in the robot base frame */
     double azimuth;                   /* gun position round the part; 0 faces the robot */
     double rpm;                       /* rotator speed                     */
 
+    /* A flat part */
+    RgVec3 plane;                     /* the drawing's origin, robot base frame */
+    RgQuat plane_rot;                 /* drawing X, Y and the surface normal    */
+    double spray_speed;               /* along a stroke, mm/s                   */
+
     /* The process */
     double fan_width;                 /* spray pattern width at the standoff */
-    double overlap;                   /* percent of the fan width per turn */
+    double fan_along;                 /* flat: the fan's long axis in the drawing
+                                         plane, degrees from X. A stroke should
+                                         run across it, not along it. */
+    double overlap;                   /* percent of the fan width covered again */
     double standoff;                  /* gun tip to surface                */
-    int    coats;                     /* traverses per band                */
-    bool   start_top;                 /* first traverse runs downwards     */
+    int    coats;                     /* cylinder: traverses per band      */
+    bool   start_top;                 /* cylinder: first traverse downwards */
     double accel;                     /* robot acceleration assumed for run-up */
-    double approach;                  /* radial clearance before and after a band */
+    double approach;                  /* clearance before and after spraying */
     double travel_speed, approach_speed, max_spray_speed;   /* mm/s */
 
     /* The gun */
@@ -96,11 +125,25 @@ typedef struct {
     double clearance;                 /* arm points from the part surface  */
     double max_joint_step;            /* per sample; more is a flip        */
     double sample_step;               /* along every linear move           */
-    double wrap_tolerance;            /* drawing width vs circumference    */
+    double wrap_tolerance;            /* cylinder drawing vs circumference */
     double join_tolerance, chord_tolerance;
+
+    /* Flat: the painted pattern, in order. Owned: see rg_job_free. */
+    RgStroke *strokes;
+    int       nstrokes;
 } RgJob;
 
 void rg_job_default(RgJob *j);
+
+/* Frees the strokes. The job is left valid and empty of strokes. */
+void rg_job_free(RgJob *j);
+
+/* A deep copy. `dst` is overwritten without being freed first. */
+bool rg_job_copy(RgJob *dst, const RgJob *src);
+
+/* Append a stroke (copied); false out of memory. */
+bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n);
+void rg_job_delete_stroke(RgJob *j, int index);
 
 /* Parse a job file's text over a job (normally defaulted first). The error
  * names the line. */
@@ -108,12 +151,20 @@ bool rg_job_parse(RgJob *j, const char *text, char *err, size_t errcap);
 
 bool rg_job_load(RgJob *j, const char *path, char *err, size_t errcap);
 
+/* The job as a job file. Parsing the result gives back the same job. */
+void rg_job_write(const RgJob *j, RgBuf *out);
+
+bool rg_job_save(const RgJob *j, const char *path, char *err, size_t errcap);
+
 /* Everything required is present and consistent with its controller and
  * robot. Geometry and reach are the plan's business, not this. */
 bool rg_job_validate(const RgJob *j, char *err, size_t errcap);
 
-/* A complete, commented job file to start from. */
+/* Complete, commented job files to start from. */
 const char *rg_job_template(void);
+const char *rg_job_template_flat(void);
+
+const char *rg_part_name(RgPartKind k);
 
 /* The gun's tooldata frame, and the work object in the robot base frame. */
 RgPose rg_job_tool(const RgJob *j);

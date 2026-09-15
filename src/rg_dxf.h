@@ -48,11 +48,15 @@ typedef struct {
     int     insunits;    /* $INSUNITS as read; -1 when absent */
     double  to_mm;       /* the scale that was applied        */
     int     skipped;     /* annotation entities passed over   */
+    int     unsupported; /* lenient: geometry that was left out */
+    char    unsupported_kind[16];   /* ...and the first kind of it */
 } RgDrawing;
 
 typedef struct {
     double      chord_tol_mm;   /* > 0 */
     const char *layer;          /* NULL or "" reads every layer */
+    bool        lenient;        /* count what cannot be read instead of refusing:
+                                   for showing a drawing, never for a program */
 } RgDxfOptions;
 
 bool rg_dxf_read(const char *text, size_t len, const RgDxfOptions *opt, RgDrawing *out,
@@ -62,5 +66,11 @@ bool rg_dxf_load(const char *path, const RgDxfOptions *opt, RgDrawing *out,
                  char *err, size_t errcap);
 
 void rg_drawing_free(RgDrawing *d);
+
+/* Every coordinate multiplied by s. */
+void rg_drawing_scale(RgDrawing *d, double s);
+
+/* A deep copy; false out of memory, with dst left empty. */
+bool rg_drawing_copy(RgDrawing *dst, const RgDrawing *src);
 
 #endif /* RG_DXF_H */

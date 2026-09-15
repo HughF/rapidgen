@@ -204,7 +204,36 @@ static void test_numbers(void)
     CHECK_STR(rg_fmt(buf, sizeof buf, 100.0, 0), "100");
 }
 
+static void test_flat_program(void)
+{
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, rg_job_template_flat(), err, sizeof err));
+    RgPlan pl;
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    RgBuf b;
+    rg_buf_init(&b);
+    CHECK(rg_rapid_write(&j, &pl, "panel.rgj", "2026-09-15 12:00", &b, err, sizeof err));
+    const char *s = b.s ? b.s : "";
+    CHECK(strstr(s, "! Flat part: 2 strokes, 1580 mm at 300 mm/s\n") != NULL);
+    CHECK(count(s, "PERS wobjdata wRgPart:=[FALSE,TRUE,\"\",[[800,-300,200],[1,0,0,0]]") == 1);
+    CHECK(strstr(s, "wRgCylinder") == NULL);
+    CHECK(count(s, "! Stroke 1: 4 points, 1080 mm") == 1);
+    CHECK(count(s, "! Stroke 2: 2 points, 500 mm") == 1);
+    CHECK(count(s, ",vRgSpray,z1,tSprayGun\\WObj:=wRgPart;") == 2);
+    CHECK(count(s, ",vRgSpray,fine,tSprayGun\\WObj:=wRgPart;") == 2);
+    CHECK(count(s, "CONST speeddata vRgSpray:=[300,500,5000,1000];") == 1);
+    CHECK(count(s, "SetDO doGunOn,1;") == 2);
+    CHECK(count(s, "SetDO doGunOn,0;") == 2);
+    const char *prompt = strstr(s, "TPReadFK"), *on = strstr(s, "SetDO doGunOn,1;");
+    CHECK(prompt && on && prompt < on);
+    rg_buf_free(&b);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_rapid",
+    test_flat_program();
     test_structure();
     test_targets();
     test_dialects();

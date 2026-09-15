@@ -27,6 +27,36 @@ static void issues(RgBuf *b, const RgPlan *pl, RgSeverity sev, const char *title
             rg_buf_printf(b, "  - %s\n", pl->issues[i].text);
 }
 
+static void cylinder(RgBuf *b, const RgJob *j, const RgPlan *pl)
+{
+    rg_buf_printf(b, "Cylinder    radius %.1f mm, %.1f mm round, %.1f mm tall\n",
+                  j->radius, pl->circumference, j->part_height);
+    rg_buf_printf(b, "Rotator     %.1f rpm, turning on its own\n", j->rpm);
+    rg_buf_printf(b, "Spray       fan %.1f mm at %.1f mm standoff, %.0f %% overlap\n",
+                  j->fan_width, j->standoff, j->overlap);
+    rg_buf_printf(b, "            pitch %.1f mm per turn, traverse %.2f mm/s\n",
+                  pl->pitch, pl->spray_speed);
+    rg_buf_printf(b, "            run-up %.1f mm; the gun turns %.1f mm past each band edge\n",
+                  pl->runup, pl->overrun);
+    for (int i = 0; i < pl->nbands; i++)
+        rg_buf_printf(b, "%s %2d: %.1f - %.1f mm, %d coat%s\n", i ? "           " : "Bands      ",
+                      i + 1, pl->bands[i].y0, pl->bands[i].y1, j->coats, j->coats == 1 ? "" : "s");
+    if (pl->spray_time > 0.0)
+        rg_buf_printf(b, "Spraying    %.0f s, %.1f turns of the part\n",
+                      pl->spray_time, pl->spray_time * j->rpm / 60.0);
+}
+
+static void flat(RgBuf *b, const RgJob *j, const RgPlan *pl)
+{
+    rg_buf_printf(b, "Part        flat; the drawing's origin is at [%.1f, %.1f, %.1f] in the\n"
+                     "            robot base frame\n", j->plane.x, j->plane.y, j->plane.z);
+    rg_buf_printf(b, "Strokes     %d, %.0f mm in all, at %.0f mm/s\n", j->nstrokes,
+                  pl->stroke_length, pl->spray_speed);
+    rg_buf_printf(b, "Spray       fan %.1f mm at %.1f mm standoff\n", j->fan_width, j->standoff);
+    if (pl->spray_time > 0.0)
+        rg_buf_printf(b, "Spraying    %.0f s along the strokes\n", pl->spray_time);
+}
+
 void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
                      const char *source, RgBuf *b)
 {
@@ -44,22 +74,10 @@ void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
                   d ? d->name : j->controller);
     rg_buf_printf(b, "Robot       %s (kinematics not yet checked on a controller)\n",
                   r ? r->name : j->robot);
-    rg_buf_printf(b, "Cylinder    radius %.1f mm, %.1f mm round, %.1f mm tall\n",
-                  j->radius, pl->circumference, j->part_height);
-    rg_buf_printf(b, "Rotator     %.1f rpm, turning on its own\n", j->rpm);
-    rg_buf_printf(b, "Spray       fan %.1f mm at %.1f mm standoff, %.0f %% overlap\n",
-                  j->fan_width, j->standoff, j->overlap);
-    rg_buf_printf(b, "            pitch %.1f mm per turn, traverse %.2f mm/s\n",
-                  pl->pitch, pl->spray_speed);
-    rg_buf_printf(b, "            run-up %.1f mm; the gun turns %.1f mm past each band edge\n",
-                  pl->runup, pl->overrun);
-
-    for (int i = 0; i < pl->nbands; i++)
-        rg_buf_printf(b, "%s %2d: %.1f - %.1f mm, %d coat%s\n", i ? "           " : "Bands      ",
-                      i + 1, pl->bands[i].y0, pl->bands[i].y1, j->coats, j->coats == 1 ? "" : "s");
-    if (pl->spray_time > 0.0)
-        rg_buf_printf(b, "Spraying    %.0f s, %.1f turns of the part\n",
-                      pl->spray_time, pl->spray_time * j->rpm / 60.0);
+    if (j->part == RG_PART_FLAT)
+        flat(b, j, pl);
+    else
+        cylinder(b, j, pl);
 
     if (pl->samples) {
         rg_buf_printf(b, "\nChecked     %d arm positions%s\n", pl->samples,
@@ -82,13 +100,15 @@ void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
     issues(b, pl, RG_WARN, "WARNINGS");
     issues(b, pl, RG_NOTE, "NOTES");
 
-    rg_buf_puts(b,
+    rg_buf_printf(b,
         "\nNOT CHECKED\n"
-        "  - the gun body and the arm's links against the part, the rotator and the\n"
+        "  - the gun body and the arm's links against the part, %s and the\n"
         "    cell: only the wrist centre, flange and gun tip are kept clear of the part\n"
         "  - the IRB 2400's axis 2/3 interaction limit\n"
         "  - the controller's own corner blending and speed near the stops\n"
-        "  - film thickness: pitch and coats set it, the spray process decides it\n"
+        "  - film thickness: %s set it, the spray process decides it\n"
         "  - that the program loads: the file format is not yet checked on an S4\n"
-        "\nRun it in simulation first, then step through it in manual reduced speed.\n");
+        "\nRun it in simulation first, then step through it in manual reduced speed.\n",
+        j->part == RG_PART_FLAT ? "its fixture" : "the rotator",
+        j->part == RG_PART_FLAT ? "speed and spacing" : "pitch and coats");
 }

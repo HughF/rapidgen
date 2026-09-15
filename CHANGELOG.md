@@ -7,6 +7,59 @@ a second release on the same day.
 
 ### Added
 
+- **Flat parts.** A part lying still on a plane, sprayed along *strokes*: the
+  gun points along the surface normal at the standoff and follows each stroke
+  in turn, stopping on the point at the end of one. Strokes live in the job
+  file, so a pattern can be read, edited by hand, and kept in version control.
+- **The editor** (`rapidgen` with no arguments): an SDL2 and Nuklear window in
+  the house style, with three pages.
+  - *Draw* shows the part's DXF with the pattern painted over it. Each stroke
+    is drawn as a translucent band as wide as the spray fan — what will
+    actually be coated — with its number at the start and arrows along it, so
+    the order and direction are visible. Tools: Select, Line (snapping to the
+    drawing's corners and lines), freehand Draw (thinned when the button is
+    let go), Trace (round an outline, inset by an amount), Fill (parallel
+    passes across a region, previewed on hover), and Scale.
+  - *Settings* edits every value the job file holds.
+  - *Program* runs the checks as the job changes, lists what was refused,
+    and shows the report and the program before writing them.
+- **The fan's direction** (`fan_along`) for flat parts, because a spray fan is
+  a wide slot and the gun does not turn during a program: a stroke running
+  across the fan lays down a band its full width, one running along it paints
+  a narrow line. The canvas draws what the fan really sweeps, and the report
+  warns with how much of the painted length runs within 30° of the fan.
+- **Scaling a drawing to a dimension**: click two points a known distance
+  apart and type the true distance, or set the drawing's overall width. The
+  strokes scale with the drawing so they stay where they were painted.
+- **Pattern tools** as a tested core (`rg_pattern`): Ramer–Douglas–Peucker
+  thinning, snapping to a drawing's vertices and edges, tracing an outline
+  with a mitred inset, and filling a region with parallel passes joined into
+  zig-zags where the region allows. Fill passes run past the region's own
+  outline so its edge gets a full coat, and stop exactly on the edge of a
+  hole so nothing meant to stay bare is sprayed.
+- **Flat-part checks**: several strokes need a gun signal, because the gun
+  must be off between them; sharp corners are counted and reported, since the
+  robot slows through each one and the coat builds up there; and reach, joint
+  limits, wrist singularity, flips and clearance are checked as for a
+  cylinder.
+- Job files can be written as well as read, so the editor and the command
+  line share one format; `rapidgen --template flat` prints a flat-part
+  example.
+- A tolerant DXF read and outline builder for the editor: centre lines,
+  dimension lines and anything rapidgen cannot read are counted and left out
+  rather than refused, so a real part drawing can be traced over. Generating
+  a program still refuses them.
+
+### Changed
+
+- The program writer places a 1 mm zone on the points inside a stroke and
+  stops exactly on its last point, and names the work object for the kind of
+  part.
+
+## [Unreleased before the editor]
+
+### Added
+
 - Spray programs for an ABB IRB 2400 (/10, /16) on S4, S4C and S4C+
   controllers, for a cylinder on a rotator that turns continuously and
   independently of the robot: gun square to the surface at a set standoff,

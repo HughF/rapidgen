@@ -24,16 +24,22 @@
  * this many of a kind the rest are counted, not listed. */
 #define MAX_LISTED 3
 
+/* A change of direction along a stroke sharper than this makes the robot
+ * slow noticeably through the corner. */
+#define SHARP_CORNER_DEG 45.0
+
 typedef enum { KIND_REACH, KIND_FLIP, KIND_CLEAR, KIND_COUNT } IssueKind;
 
 typedef struct {
     const RgJob   *job;
     const RgRobot *robot;
     RgPlan        *pl;
+    bool           flat;
     RgPose         wobj, wobj_inv, tool, tool_inv;
     double         joints[RG_AXES];
     int            counts[KIND_COUNT];
     bool           oom;
+    double         fx0, fy0, fx1, fy1;   /* flat: where the part is taken to be */
 } Ctx;
 
 static void issue(Ctx *c, RgSeverity sev, const char *fmt, ...) RG_PRINTF(3, 4);
@@ -176,10 +182,10 @@ static void bands_from_shape(Ctx *c, const RgShape *s)
 
 /* ---- geometry ------------------------------------------------------- */
 
-/* The gun square to the surface, `out` beyond the standoff, at height z.
- * Tool Z points at the axis; tool X, the fan's long axis, points up the part,
- * across the direction the surface moves under the gun. */
-static RgPose gun_pose(const RgJob *j, double z, double out)
+/* Cylinder: the gun square to the surface, `out` beyond the standoff, at
+ * height z. Tool Z points at the axis; tool X, the fan's long axis, points up
+ * the part, across the direction the surface moves under the gun. */
+static RgPose gun_cylinder(const RgJob *j, double z, double out)
 {
     double th = j->azimuth * RG_DEG;
     RgVec3 u = rg_v3(cos(th), sin(th), 0.0);
@@ -190,13 +196,25 @@ static RgPose gun_pose(const RgJob *j, double z, double out)
                    rg_v3_add(rg_v3_scale(u, j->radius + j->standoff + out), rg_v3(0, 0, z)));
 }
 
+/* Flat: the gun pointing into the surface, `out` above the standoff, over a
+ * point of the drawing. Tool X is the fan's long axis, laid along
+ * `fan_along`; the gun keeps that one orientation for the whole program. */
+static RgPose gun_flat(const RgJob *j, RgPt p, double out)
+{
+    double a = j->fan_along * RG_DEG;
+    RgVec3 tx = rg_v3(cos(a), sin(a), 0);
+    RgVec3 tz = rg_v3(0, 0, -1);
+    RgVec3 ty = rg_v3_cross(tz, tx);
+    return rg_pose(rg_m3_from_cols(tx, ty, tz), rg_v3(p.x, p.y, j->standoff + out));
+}
+
 static RgPose tool0_for(const Ctx *c, const RgPose *tcp)
 {
     return rg_pose_mul(rg_pose_mul(c->wobj, *tcp), c->tool_inv);
 }
 
-static RgMove *add_move(Ctx *c, RgMoveKind kind, RgSpeedKind speed, bool fine,
-                        RgPose tcp, int band, const char *note)
+static RgMove *add_move(Ctx *c, RgMoveKind kind, RgSpeedKind speed, RgZone zone,
+                        RgPose tcp, int group, const char *note)
 {
     RgPlan *pl = c->pl;
     RgMove *m = realloc(pl->moves, (size_t)(pl->nmoves + 1) * sizeof *m);
@@ -209,20 +227,24 @@ static RgMove *add_move(Ctx *c, RgMoveKind kind, RgSpeedKind speed, bool fine,
     memset(mv, 0, sizeof *mv);
     mv->kind = kind;
     mv->speed = speed;
-    mv->fine = fine;
+    mv->zone = zone;
     mv->tcp = tcp;
-    mv->band = band;
+    mv->group = group;
     rg_copy(mv->note, sizeof mv->note, note ? note : "");
     return mv;
 }
 
-static void build_moves(Ctx *c)
+static RgPose no_pose(void)
+{
+    return rg_pose(rg_m3_identity(), rg_v3(0, 0, 0));
+}
+
+static void build_cylinder(Ctx *c)
 {
     const RgJob *j = c->job;
     RgPlan *pl = c->pl;
-    RgPose none = rg_pose(rg_m3_identity(), rg_v3(0, 0, 0));
 
-    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, true, none, -1, "Home");
+    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
     for (int b = 0; b < pl->nbands && !c->oom; b++) {
         const RgBand *bd = &pl->bands[b];
         double lo = bd->y0 - pl->overrun, hi = bd->y1 + pl->overrun;
@@ -231,8 +253,10 @@ static void build_moves(Ctx *c)
         snprintf(note, sizeof note, "Band %d: %.1f-%.1f mm, %d coat%s", b + 1, bd->y0, bd->y1,
                  j->coats, j->coats == 1 ? "" : "s");
 
-        add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, false, gun_pose(j, z_start, j->approach), b, note);
-        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, true, gun_pose(j, z_start, 0), b, NULL);
+        add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_cylinder(j, z_start, j->approach),
+                 b, note);
+        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_FINE,
+                              gun_cylinder(j, z_start, 0), b, NULL);
         if (!in)
             return;
         if (b == 0 && j->ready_prompt)
@@ -244,15 +268,60 @@ static void build_moves(Ctx *c)
         RgMove *last = in;
         for (int k = 0; k < j->coats; k++) {
             z = (k % 2 == 0) ? z_other : z_start;
-            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, true, gun_pose(j, z, 0), b, NULL);
+            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_FINE, gun_cylinder(j, z, 0), b, NULL);
             if (!last)
                 return;
         }
         if (j->gun_signal[0])
             last->after = RG_ACT_GUN_OFF;
-        add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, false, gun_pose(j, z, j->approach), b, NULL);
+        add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_cylinder(j, z, j->approach),
+                 b, NULL);
     }
-    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, true, none, -1, "Home");
+    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+}
+
+static void build_flat(Ctx *c)
+{
+    const RgJob *j = c->job;
+
+    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+    for (int s = 0; s < j->nstrokes && !c->oom; s++) {
+        const RgStroke *st = &j->strokes[s];
+        char note[80];
+        double len = 0.0;
+        for (int k = 1; k < st->n; k++)
+            len += hypot(st->pts[k].x - st->pts[k - 1].x, st->pts[k].y - st->pts[k - 1].y);
+        snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm", s + 1, st->n, len);
+
+        add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_flat(j, st->pts[0], j->approach),
+                 s, note);
+        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_FINE,
+                              gun_flat(j, st->pts[0], 0), s, NULL);
+        if (!in)
+            return;
+        if (s == 0 && j->ready_prompt)
+            in->after = RG_ACT_READY;
+        else if (j->gun_signal[0])
+            in->after = RG_ACT_GUN_ON;
+
+        RgMove *last = in;
+        RgPt at = st->pts[0];
+        for (int k = 1; k < st->n; k++) {
+            if (hypot(st->pts[k].x - at.x, st->pts[k].y - at.y) < 1e-6)
+                continue;
+            at = st->pts[k];
+            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, k == st->n - 1 ? RG_Z_FINE : RG_Z_SMALL,
+                            gun_flat(j, at, 0), s, NULL);
+            if (!last)
+                return;
+        }
+        last->zone = RG_Z_FINE;
+        if (j->gun_signal[0])
+            last->after = RG_ACT_GUN_OFF;
+        add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_flat(j, at, j->approach),
+                 s, NULL);
+    }
+    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
 }
 
 /* ---- following the moves through the arm ---------------------------- */
@@ -263,23 +332,31 @@ static void build_moves(Ctx *c)
 static void where(const Ctx *c, const RgMove *m, const RgPose *tcp, bool between,
                   char *buf, size_t cap)
 {
+    const char *what = c->flat ? "stroke" : "band";
     switch (m->kind) {
     case RG_MV_HOME:
         snprintf(buf, cap, between ? "on the way home" : "at the home position");
         return;
     case RG_MV_JOINT:
         if (between)
-            snprintf(buf, cap, "on the way to band %d", m->band + 1);
+            snprintf(buf, cap, "on the way to %s %d", what, m->group + 1);
+        else if (c->flat)
+            snprintf(buf, cap, "at the approach to stroke %d, above (%.1f, %.1f)",
+                     m->group + 1, tcp->pos.x, tcp->pos.y);
         else
             snprintf(buf, cap, "at the approach to band %d, gun at height %.1f mm",
-                     m->band + 1, tcp->pos.z);
+                     m->group + 1, tcp->pos.z);
         return;
-    case RG_MV_LINEAR: {
-        const RgBand *b = &c->pl->bands[m->band];
-        snprintf(buf, cap, "in band %d (%.0f-%.0f mm), gun at height %.1f mm",
-                 m->band + 1, b->y0, b->y1, tcp->pos.z);
+    case RG_MV_LINEAR:
+        if (c->flat) {
+            snprintf(buf, cap, "in stroke %d at (%.1f, %.1f)", m->group + 1, tcp->pos.x,
+                     tcp->pos.y);
+        } else {
+            const RgBand *b = &c->pl->bands[m->group];
+            snprintf(buf, cap, "in band %d (%.0f-%.0f mm), gun at height %.1f mm",
+                     m->group + 1, b->y0, b->y1, tcp->pos.z);
+        }
         return;
-    }
     }
 }
 
@@ -297,9 +374,16 @@ static void check_clearance(Ctx *c, const RgMove *m, const double q[RG_AXES],
 
     for (int i = 0; i < 3; i++) {
         RgVec3 p = rg_pose_apply(c->wobj_inv, pts[i]);
-        if (p.z < -j->clearance || p.z > j->part_height + j->clearance)
-            continue;
-        double gap = hypot(p.x, p.y) - j->radius;
+        double gap;
+        if (c->flat) {
+            if (p.x < c->fx0 || p.x > c->fx1 || p.y < c->fy0 || p.y > c->fy1)
+                continue;
+            gap = p.z;
+        } else {
+            if (p.z < -j->clearance || p.z > j->part_height + j->clearance)
+                continue;
+            gap = hypot(p.x, p.y) - j->radius;
+        }
         if (gap < c->pl->min_clearance) {
             c->pl->min_clearance = gap;
             char at[96];
@@ -452,7 +536,7 @@ static void follow(Ctx *c)
 
 /* ---- the plan ------------------------------------------------------- */
 
-static void check_process(Ctx *c)
+static void check_cylinder(Ctx *c)
 {
     const RgJob *j = c->job;
     RgPlan *pl = c->pl;
@@ -513,6 +597,79 @@ static void check_process(Ctx *c)
               h, j->radius, j->standoff, j->clearance);
 }
 
+static void check_flat(Ctx *c)
+{
+    const RgJob *j = c->job;
+    RgPlan *pl = c->pl;
+
+    if (j->nstrokes == 0)
+        issue(c, RG_REFUSE, "there is nothing to spray: paint at least one stroke");
+    if (pl->spray_speed > j->max_spray_speed)
+        issue(c, RG_REFUSE, "spray_speed %.0f mm/s is above max_spray_speed %.0f mm/s",
+              pl->spray_speed, j->max_spray_speed);
+    if (j->nstrokes > 1 && !j->gun_signal[0])
+        issue(c, RG_REFUSE, "there are %d strokes, and without gun_signal the gun cannot be "
+              "switched off between them: set gun_signal, or join them into one stroke",
+              j->nstrokes);
+    if (j->nstrokes == 1 && !j->gun_signal[0])
+        issue(c, RG_WARN, "the gun is controlled outside the program: it must only spray "
+              "while the robot moves along the stroke. Spraying while the arm waits at the "
+              "start leaves a heavy spot there");
+
+    double x0 = DBL_MAX, y0 = DBL_MAX, x1 = -DBL_MAX, y1 = -DBL_MAX;
+    double fan_a = j->fan_along * RG_DEG, fx = cos(fan_a), fy = sin(fan_a);
+    double along_fan = 0.0;
+    for (int s = 0; s < j->nstrokes; s++) {
+        const RgStroke *st = &j->strokes[s];
+        if (st->n < 2)
+            issue(c, RG_REFUSE, "stroke %d has only one point", s + 1);
+        for (int k = 0; k < st->n; k++) {
+            RgPt p = st->pts[k];
+            x0 = fmin(x0, p.x); x1 = fmax(x1, p.x);
+            y0 = fmin(y0, p.y); y1 = fmax(y1, p.y);
+            if (k > 0) {
+                double dx = p.x - st->pts[k - 1].x, dy = p.y - st->pts[k - 1].y;
+                double len = hypot(dx, dy);
+                pl->stroke_length += len;
+                /* A segment running along the fan paints a line the fan's
+                 * thickness, not a band its width. */
+                if (len > 1e-9 && fabs((dx * fx + dy * fy) / len) > cos(30.0 * RG_DEG))
+                    along_fan += len;
+            }
+            if (k > 0 && k + 1 < st->n) {
+                RgPt a = st->pts[k - 1], b = st->pts[k + 1];
+                double ax = p.x - a.x, ay = p.y - a.y, bx = b.x - p.x, by = b.y - p.y;
+                double la = hypot(ax, ay), lb = hypot(bx, by);
+                if (la > 1e-6 && lb > 1e-6) {
+                    double cosang = (ax * bx + ay * by) / (la * lb);
+                    if (cosang < cos(SHARP_CORNER_DEG * RG_DEG))
+                        pl->sharp_corners++;
+                }
+            }
+        }
+    }
+    if (pl->sharp_corners)
+        issue(c, RG_NOTE, "the gun turns more than %.0f deg at %d point%s along the strokes: "
+              "the robot slows through each corner, so the coat is heavier there",
+              SHARP_CORNER_DEG, pl->sharp_corners, pl->sharp_corners == 1 ? "" : "s");
+
+    pl->along_fan_length = along_fan;
+    if (along_fan > 10.0 && along_fan > 0.02 * pl->stroke_length)
+        issue(c, RG_WARN, "%.0f mm of the %.0f mm painted (%.0f %%) runs within 30 deg of the "
+              "fan's long axis, which lies at %.0f deg: there the gun lays a narrow line, not "
+              "a band %.0f mm wide. Turn the fan (fan_along), or paint those parts across it",
+              along_fan, pl->stroke_length, 100.0 * along_fan / pl->stroke_length, j->fan_along,
+              j->fan_width);
+
+    /* The part is taken to be under the pattern and its spray, plus the
+     * clearance; the arm is kept above the surface anywhere over it. */
+    double margin = 0.5 * j->fan_width + j->clearance;
+    c->fx0 = x0 - margin;
+    c->fy0 = y0 - margin;
+    c->fx1 = x1 + margin;
+    c->fy1 = y1 + margin;
+}
+
 static void check_limits(Ctx *c)
 {
     const RgJob *j = c->job;
@@ -523,8 +680,9 @@ static void check_limits(Ctx *c)
     if (pl->min_wrist < j->min_wrist)
         issue(c, RG_REFUSE, "axis 5 comes within %.1f deg of straight %s, and the rule is "
               "%.1f deg: near the wrist singularity axes 4 and 6 spin fast and the TCP "
-              "speed is not held. Tilt the gun on its mount (tool_rot), or move azimuth",
-              pl->min_wrist, pl->min_wrist_at, j->min_wrist);
+              "speed is not held. Tilt the gun on its mount (tool_rot)%s",
+              pl->min_wrist, pl->min_wrist_at, j->min_wrist,
+              c->flat ? ", or move or turn the part" : ", or move azimuth");
     else if (pl->min_wrist < j->min_wrist + 5.0)
         issue(c, RG_WARN, "axis 5 comes within %.1f deg of straight %s; the rule is %.1f deg",
               pl->min_wrist, pl->min_wrist_at, j->min_wrist);
@@ -554,6 +712,7 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     memset(&c, 0, sizeof c);
     c.job = job;
     c.pl = pl;
+    c.flat = job->part == RG_PART_FLAT;
     c.robot = rg_robot_find(job->robot);
     if (!c.robot) {
         issue(&c, RG_REFUSE, "robot \"%s\" is not known", job->robot);
@@ -564,24 +723,28 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     c.tool = rg_job_tool(job);
     c.tool_inv = rg_pose_inverse(c.tool);
 
-    pl->circumference = 2.0 * RG_PI * job->radius;
     pl->pitch = job->fan_width * (1.0 - job->overlap / 100.0);
-    pl->spray_speed = pl->pitch * job->rpm / 60.0;
-    pl->runup = pl->spray_speed * pl->spray_speed / (2.0 * job->accel);
-    pl->overrun = 0.5 * job->fan_width + pl->runup;
-    pl->reach_past_edge = pl->overrun + 0.5 * job->fan_width;
-
-    if (shape) {
-        bands_from_shape(&c, shape);
+    if (c.flat) {
+        pl->spray_speed = job->spray_speed;
     } else {
-        RgBand sorted[RG_MAX_BANDS];
-        memcpy(sorted, job->bands, (size_t)job->nbands * sizeof sorted[0]);
-        qsort(sorted, (size_t)job->nbands, sizeof sorted[0], band_cmp);
-        for (int i = 0; i < job->nbands; i++)
-            add_band(&c, sorted[i].y0, sorted[i].y1);
+        pl->circumference = 2.0 * RG_PI * job->radius;
+        pl->spray_speed = pl->pitch * job->rpm / 60.0;
+        pl->runup = pl->spray_speed * pl->spray_speed / (2.0 * job->accel);
+        pl->overrun = 0.5 * job->fan_width + pl->runup;
+        pl->reach_past_edge = pl->overrun + 0.5 * job->fan_width;
+
+        if (shape) {
+            bands_from_shape(&c, shape);
+        } else {
+            RgBand sorted[RG_MAX_BANDS];
+            memcpy(sorted, job->bands, (size_t)job->nbands * sizeof sorted[0]);
+            qsort(sorted, (size_t)job->nbands, sizeof sorted[0], band_cmp);
+            for (int i = 0; i < job->nbands; i++)
+                add_band(&c, sorted[i].y0, sorted[i].y1);
+        }
+        if (pl->nbands == 0 && !pl->refused)
+            issue(&c, RG_REFUSE, "there is nothing to spray: no band goes all the way round");
     }
-    if (pl->nbands == 0 && !pl->refused)
-        issue(&c, RG_REFUSE, "there is nothing to spray: no band goes all the way round");
 
     RgPose t0;
     rg_robot_fk(c.robot, job->home, &t0, NULL);
@@ -591,17 +754,23 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     if (!rg_robot_within_limits(c.robot, job->home))
         issue(&c, RG_REFUSE, "the home position is outside the robot's joint limits");
 
-    check_process(&c);
+    if (c.flat)
+        check_flat(&c);
+    else
+        check_cylinder(&c);
     if (pl->refused)
         return false;
 
-    build_moves(&c);
+    if (c.flat)
+        build_flat(&c);
+    else
+        build_cylinder(&c);
     if (!c.oom)
         follow(&c);
     check_limits(&c);
 
-    for (int i = 0; i < pl->nmoves; i++)
-        if (pl->moves[i].speed == RG_SPD_SPRAY && i > 0)
+    for (int i = 1; i < pl->nmoves; i++)
+        if (pl->moves[i].speed == RG_SPD_SPRAY)
             pl->spray_time += rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
                                                   pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
     if (c.oom)

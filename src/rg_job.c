@@ -13,7 +13,7 @@
 #include "rg_job.h"
 #include "rg_rapid.h"
 #include "rg_robot.h"
-#include "rg_text.h"
+#include "rg_version.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -30,6 +30,8 @@ void rg_job_default(RgJob *j)
 {
     memset(j, 0, sizeof *j);
     rg_copy(j->robot, sizeof j->robot, "irb2400_16");
+    j->part = RG_PART_CYLINDER;
+    j->drawing_scale = 1.0;
 
     j->radius = UNSET;
     j->part_height = UNSET;
@@ -37,7 +39,12 @@ void rg_job_default(RgJob *j)
     j->azimuth = 0.0;
     j->rpm = UNSET;
 
+    j->plane = rg_v3(UNSET, UNSET, UNSET);
+    j->plane_rot.q1 = 1.0;
+    j->spray_speed = UNSET;
+
     j->fan_width = UNSET;
+    j->fan_along = 90.0;
     j->overlap = 50.0;
     j->standoff = UNSET;
     j->coats = 1;
@@ -66,65 +73,144 @@ void rg_job_default(RgJob *j)
     j->chord_tolerance = 0.2;
 }
 
+void rg_job_free(RgJob *j)
+{
+    for (int i = 0; i < j->nstrokes; i++)
+        free(j->strokes[i].pts);
+    free(j->strokes);
+    j->strokes = NULL;
+    j->nstrokes = 0;
+}
+
+bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
+{
+    if (n < 1)
+        return true;
+    RgStroke *s = realloc(j->strokes, (size_t)(j->nstrokes + 1) * sizeof *s);
+    if (!s)
+        return false;
+    j->strokes = s;
+    RgPt *copy = malloc((size_t)n * sizeof *copy);
+    if (!copy)
+        return false;
+    memcpy(copy, pts, (size_t)n * sizeof *copy);
+    s[j->nstrokes].pts = copy;
+    s[j->nstrokes].n = n;
+    j->nstrokes++;
+    return true;
+}
+
+void rg_job_delete_stroke(RgJob *j, int index)
+{
+    if (index < 0 || index >= j->nstrokes)
+        return;
+    free(j->strokes[index].pts);
+    memmove(&j->strokes[index], &j->strokes[index + 1],
+            (size_t)(j->nstrokes - index - 1) * sizeof j->strokes[0]);
+    j->nstrokes--;
+}
+
+bool rg_job_copy(RgJob *dst, const RgJob *src)
+{
+    *dst = *src;
+    dst->strokes = NULL;
+    dst->nstrokes = 0;
+    for (int i = 0; i < src->nstrokes; i++)
+        if (!rg_job_add_stroke(dst, src->strokes[i].pts, src->strokes[i].n)) {
+            rg_job_free(dst);
+            return false;
+        }
+    return true;
+}
+
+const char *rg_part_name(RgPartKind k)
+{
+    return k == RG_PART_FLAT ? "flat" : "cylinder";
+}
+
 /* ---- the key table -------------------------------------------------- */
 
-typedef enum { K_IDENT, K_TEXT, K_NUM, K_INT, K_BOOL, K_VEC3, K_QUAT, K_JOINTS, K_BAND, K_START } KType;
+typedef enum {
+    K_IDENT, K_TEXT, K_NUM, K_INT, K_BOOL, K_VEC3, K_QUAT, K_JOINTS, K_BAND,
+    K_START, K_PART, K_STROKE
+} KType;
 
 typedef struct {
     const char *key;
     KType       type;
     size_t      off, cap;
     double      lo, hi;
+    const char *group;     /* heading the writer puts above it */
 } Key;
 
 #define F(field)          offsetof(RgJob, field)
 #define S(field)          sizeof(((RgJob *)0)->field)
 
+static const char G_WHAT[]  = "what and where";
+static const char G_CYL[]   = "a cylinder on a rotator";
+static const char G_FLAT[]  = "a flat part";
+static const char G_PROC[]  = "the process";
+static const char G_GUN[]   = "the gun";
+static const char G_PROG[]  = "around the program";
+static const char G_RULES[] = "rules the plan must keep";
+static const char G_PAINT[] = "the painted strokes, in order: x y pairs in drawing mm";
+
 static const Key keys[] = {
-    { "name",            K_IDENT,  F(name),            S(name),         0, 0 },
-    { "controller",      K_TEXT,   F(controller),      S(controller),   0, 0 },
-    { "robot",           K_TEXT,   F(robot),           S(robot),        0, 0 },
-    { "drawing",         K_TEXT,   F(drawing),         S(drawing),      0, 0 },
-    { "layer",           K_TEXT,   F(layer),           S(layer),        0, 0 },
-    { "band",            K_BAND,   0,                  0,               -100000, 100000 },
+    { "name",            K_IDENT,  F(name),            S(name),         0, 0, G_WHAT },
+    { "controller",      K_TEXT,   F(controller),      S(controller),   0, 0, G_WHAT },
+    { "robot",           K_TEXT,   F(robot),           S(robot),        0, 0, G_WHAT },
+    { "part",            K_PART,   F(part),            0,               0, 0, G_WHAT },
+    { "drawing",         K_TEXT,   F(drawing),         S(drawing),      0, 0, G_WHAT },
+    { "layer",           K_TEXT,   F(layer),           S(layer),        0, 0, G_WHAT },
+    { "drawing_scale",   K_NUM,    F(drawing_scale),   0,               1e-6, 1e6, G_WHAT },
+    { "band",            K_BAND,   0,                  0,               -100000, 100000, G_WHAT },
 
-    { "radius",          K_NUM,    F(radius),          0,               10, 5000 },
-    { "part_height",     K_NUM,    F(part_height),     0,               1, 10000 },
-    { "axis",            K_VEC3,   F(axis),            0,               -10000, 10000 },
-    { "azimuth",         K_NUM,    F(azimuth),         0,               -90, 90 },
-    { "rpm",             K_NUM,    F(rpm),             0,               0.1, 300 },
+    { "radius",          K_NUM,    F(radius),          0,               10, 5000, G_CYL },
+    { "part_height",     K_NUM,    F(part_height),     0,               1, 10000, G_CYL },
+    { "axis",            K_VEC3,   F(axis),            0,               -10000, 10000, G_CYL },
+    { "azimuth",         K_NUM,    F(azimuth),         0,               -90, 90, G_CYL },
+    { "rpm",             K_NUM,    F(rpm),             0,               0.1, 300, G_CYL },
 
-    { "fan_width",       K_NUM,    F(fan_width),       0,               5, 1000 },
-    { "overlap",         K_NUM,    F(overlap),         0,               0, 90 },
-    { "standoff",        K_NUM,    F(standoff),        0,               10, 1000 },
-    { "coats",           K_INT,    F(coats),           0,               1, 50 },
-    { "start",           K_START,  F(start_top),       0,               0, 0 },
-    { "accel",           K_NUM,    F(accel),           0,               10, 20000 },
-    { "approach",        K_NUM,    F(approach),        0,               20, 1000 },
-    { "travel_speed",    K_NUM,    F(travel_speed),    0,               10, 2000 },
-    { "approach_speed",  K_NUM,    F(approach_speed),  0,               5, 1000 },
-    { "max_spray_speed", K_NUM,    F(max_spray_speed), 0,               1, 2000 },
+    { "plane",           K_VEC3,   F(plane),           0,               -10000, 10000, G_FLAT },
+    { "plane_rot",       K_QUAT,   F(plane_rot),       0,               -1, 1, G_FLAT },
+    { "spray_speed",     K_NUM,    F(spray_speed),     0,               1, 2000, G_FLAT },
 
-    { "tool",            K_IDENT,  F(tool),            S(tool),         0, 0 },
-    { "tool_define",     K_BOOL,   F(tool_define),     0,               0, 0 },
-    { "tool_tcp",        K_VEC3,   F(tool_tcp),        0,               -2000, 2000 },
-    { "tool_rot",        K_QUAT,   F(tool_rot),        0,               -1, 1 },
-    { "tool_mass",       K_NUM,    F(tool_mass),       0,               0.01, 50 },
-    { "tool_cog",        K_VEC3,   F(tool_cog),        0,               -2000, 2000 },
+    { "fan_width",       K_NUM,    F(fan_width),       0,               5, 1000, G_PROC },
+    { "fan_along",       K_NUM,    F(fan_along),       0,               -180, 180, G_PROC },
+    { "overlap",         K_NUM,    F(overlap),         0,               0, 90, G_PROC },
+    { "standoff",        K_NUM,    F(standoff),        0,               10, 1000, G_PROC },
+    { "coats",           K_INT,    F(coats),           0,               1, 50, G_PROC },
+    { "start",           K_START,  F(start_top),       0,               0, 0, G_PROC },
+    { "accel",           K_NUM,    F(accel),           0,               10, 20000, G_PROC },
+    { "approach",        K_NUM,    F(approach),        0,               20, 1000, G_PROC },
+    { "travel_speed",    K_NUM,    F(travel_speed),    0,               10, 2000, G_PROC },
+    { "approach_speed",  K_NUM,    F(approach_speed),  0,               5, 1000, G_PROC },
+    { "max_spray_speed", K_NUM,    F(max_spray_speed), 0,               1, 2000, G_PROC },
 
-    { "home",            K_JOINTS, F(home),            0,               -400, 400 },
-    { "ready_prompt",    K_BOOL,   F(ready_prompt),    0,               0, 0 },
-    { "gun_signal",      K_IDENT,  F(gun_signal),      S(gun_signal),   0, 0 },
+    { "tool",            K_IDENT,  F(tool),            S(tool),         0, 0, G_GUN },
+    { "tool_define",     K_BOOL,   F(tool_define),     0,               0, 0, G_GUN },
+    { "tool_tcp",        K_VEC3,   F(tool_tcp),        0,               -2000, 2000, G_GUN },
+    { "tool_rot",        K_QUAT,   F(tool_rot),        0,               -1, 1, G_GUN },
+    { "tool_mass",       K_NUM,    F(tool_mass),       0,               0.01, 50, G_GUN },
+    { "tool_cog",        K_VEC3,   F(tool_cog),        0,               -2000, 2000, G_GUN },
 
-    { "min_wrist",       K_NUM,    F(min_wrist),       0,               0, 60 },
-    { "min_margin",      K_NUM,    F(min_margin),      0,               0, 45 },
-    { "clearance",       K_NUM,    F(clearance),       0,               0, 1000 },
-    { "max_joint_step",  K_NUM,    F(max_joint_step),  0,               1, 90 },
-    { "sample_step",     K_NUM,    F(sample_step),     0,               0.5, 100 },
-    { "wrap_tolerance",  K_NUM,    F(wrap_tolerance),  0,               0, 100 },
-    { "join_tolerance",  K_NUM,    F(join_tolerance),  0,               0.001, 10 },
-    { "chord_tolerance", K_NUM,    F(chord_tolerance), 0,               0.01, 5 },
+    { "home",            K_JOINTS, F(home),            0,               -400, 400, G_PROG },
+    { "ready_prompt",    K_BOOL,   F(ready_prompt),    0,               0, 0, G_PROG },
+    { "gun_signal",      K_IDENT,  F(gun_signal),      S(gun_signal),   0, 0, G_PROG },
+
+    { "min_wrist",       K_NUM,    F(min_wrist),       0,               0, 60, G_RULES },
+    { "min_margin",      K_NUM,    F(min_margin),      0,               0, 45, G_RULES },
+    { "clearance",       K_NUM,    F(clearance),       0,               0, 1000, G_RULES },
+    { "max_joint_step",  K_NUM,    F(max_joint_step),  0,               1, 90, G_RULES },
+    { "sample_step",     K_NUM,    F(sample_step),     0,               0.5, 100, G_RULES },
+    { "wrap_tolerance",  K_NUM,    F(wrap_tolerance),  0,               0, 100, G_RULES },
+    { "join_tolerance",  K_NUM,    F(join_tolerance),  0,               0.001, 10, G_RULES },
+    { "chord_tolerance", K_NUM,    F(chord_tolerance), 0,               0.01, 5, G_RULES },
+
+    { "stroke",          K_STROKE, 0,                  0,               -100000, 100000, G_PAINT },
 };
+
+#define N_KEYS (sizeof keys / sizeof keys[0])
 
 #undef F
 #undef S
@@ -139,26 +225,53 @@ static char *trim(char *s)
     return s;
 }
 
-/* Up to `max` numbers separated by spaces or commas; how many were read, or
- * -1 for something that is not a number. */
-static int numbers(const char *v, double *out, int max)
+/* Every number in `v`, separated by spaces or commas: a malloc'd array and
+ * its count, or NULL with *n = -1 when something is not a number. A value
+ * with no numbers gives NULL and *n = 0. */
+static double *numbers_all(const char *v, int *n)
 {
-    int n = 0;
+    double *out = NULL;
+    int count = 0, cap = 0;
     const char *p = v;
     for (;;) {
         while (*p == ' ' || *p == '\t' || *p == ',')
             p++;
         if (!*p)
-            return n;
-        if (n == max)
-            return -1;
+            break;
         char *endp;
         double d = strtod(p, &endp);
-        if (endp == p || !isfinite(d))
-            return -1;
-        out[n++] = d;
+        if (endp == p || !isfinite(d)) {
+            free(out);
+            *n = -1;
+            return NULL;
+        }
+        if (count == cap) {
+            cap = cap ? cap * 2 : 16;
+            double *grown = realloc(out, (size_t)cap * sizeof *grown);
+            if (!grown) {
+                free(out);
+                *n = -1;
+                return NULL;
+            }
+            out = grown;
+        }
+        out[count++] = d;
         p = endp;
     }
+    *n = count;
+    return out;
+}
+
+/* Exactly `want` numbers into d; false otherwise. */
+static bool numbers(const char *v, double *d, int want)
+{
+    int n;
+    double *all = numbers_all(v, &n);
+    bool ok = n == want;
+    if (ok)
+        memcpy(d, all, (size_t)want * sizeof *d);
+    free(all);
+    return ok;
 }
 
 static bool in_range(const Key *k, double v)
@@ -192,7 +305,7 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
 
     case K_NUM:
     case K_INT:
-        if (numbers(v, d, 1) != 1) {
+        if (!numbers(v, d, 1)) {
             snprintf(why, whycap, "expected a number");
             return false;
         }
@@ -233,8 +346,19 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
         }
         return true;
 
+    case K_PART:
+        if (rg_streqi(v, "cylinder"))
+            *(RgPartKind *)field = RG_PART_CYLINDER;
+        else if (rg_streqi(v, "flat"))
+            *(RgPartKind *)field = RG_PART_FLAT;
+        else {
+            snprintf(why, whycap, "expected cylinder or flat");
+            return false;
+        }
+        return true;
+
     case K_VEC3:
-        if (numbers(v, d, 3) != 3) {
+        if (!numbers(v, d, 3)) {
             snprintf(why, whycap, "expected three numbers: x y z");
             return false;
         }
@@ -247,7 +371,7 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
         return true;
 
     case K_QUAT: {
-        if (numbers(v, d, 4) != 4) {
+        if (!numbers(v, d, 4)) {
             snprintf(why, whycap, "expected four numbers: q1 q2 q3 q4");
             return false;
         }
@@ -262,7 +386,7 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
     }
 
     case K_JOINTS:
-        if (numbers(v, d, 6) != 6) {
+        if (!numbers(v, d, 6)) {
             snprintf(why, whycap, "expected six joint angles");
             return false;
         }
@@ -274,7 +398,7 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
             snprintf(why, whycap, "more than %d bands", RG_MAX_BANDS);
             return false;
         }
-        if (numbers(v, d, 2) != 2 || d[1] <= d[0]) {
+        if (!numbers(v, d, 2) || d[1] <= d[0]) {
             snprintf(why, whycap, "expected two heights, bottom then top");
             return false;
         }
@@ -282,26 +406,62 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
         j->bands[j->nbands].y1 = d[1];
         j->nbands++;
         return true;
+
+    case K_STROKE: {
+        int n;
+        double *all = numbers_all(v, &n);
+        if (n < 0) {
+            snprintf(why, whycap, "expected numbers: x y pairs");
+            return false;
+        }
+        if (n < 4 || n % 2) {
+            free(all);
+            snprintf(why, whycap, "expected x y pairs, at least two points");
+            return false;
+        }
+        RgPt *pts = malloc((size_t)(n / 2) * sizeof *pts);
+        bool ok = pts != NULL;
+        for (int i = 0; ok && i < n / 2; i++) {
+            pts[i].x = all[2 * i];
+            pts[i].y = all[2 * i + 1];
+            if (!in_range(k, pts[i].x) || !in_range(k, pts[i].y)) {
+                snprintf(why, whycap, "point %d is outside %g to %g", i + 1, k->lo, k->hi);
+                free(pts);
+                free(all);
+                return false;
+            }
+        }
+        ok = ok && rg_job_add_stroke(j, pts, n / 2);
+        free(pts);
+        free(all);
+        if (!ok)
+            snprintf(why, whycap, "out of memory");
+        return ok;
+    }
     }
     return false;
 }
 
 bool rg_job_parse(RgJob *j, const char *text, char *err, size_t errcap)
 {
+    size_t len = strlen(text);
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        snprintf(err, errcap, "out of memory");
+        return false;
+    }
+    memcpy(buf, text, len + 1);
+
+    bool ok = true;
     int lineno = 0;
-    const char *p = text;
-    while (*p) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        char line[1024];
+    char *p = buf;
+    while (ok && *p) {
+        char *nl = strchr(p, '\n');
+        if (nl)
+            *nl = '\0';
+        char *line = p;
+        p = nl ? nl + 1 : p + strlen(p);
         lineno++;
-        if (n >= sizeof line) {
-            snprintf(err, errcap, "line %d: too long", lineno);
-            return false;
-        }
-        memcpy(line, p, n);
-        line[n] = '\0';
-        p = nl ? nl + 1 : p + n;
 
         char *hash = strchr(line, '#');
         if (hash)
@@ -312,26 +472,29 @@ bool rg_job_parse(RgJob *j, const char *text, char *err, size_t errcap)
         char *eq = strchr(s, '=');
         if (!eq) {
             snprintf(err, errcap, "line %d: expected key = value", lineno);
-            return false;
+            ok = false;
+            break;
         }
         *eq = '\0';
         char *key = trim(s), *val = trim(eq + 1);
 
         const Key *k = NULL;
-        for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        for (size_t i = 0; i < N_KEYS; i++)
             if (strcmp(keys[i].key, key) == 0)
                 k = &keys[i];
         if (!k) {
             snprintf(err, errcap, "line %d: unknown setting \"%s\"", lineno, key);
-            return false;
+            ok = false;
+            break;
         }
         char why[256];
         if (!set_value(j, k, val, why, sizeof why)) {
             snprintf(err, errcap, "line %d: %s: %s", lineno, key, why);
-            return false;
+            ok = false;
         }
     }
-    return true;
+    free(buf);
+    return ok;
 }
 
 bool rg_job_load(RgJob *j, const char *path, char *err, size_t errcap)
@@ -346,6 +509,129 @@ bool rg_job_load(RgJob *j, const char *path, char *err, size_t errcap)
     free(text);
     return ok;
 }
+
+/* ---- writing -------------------------------------------------------- */
+
+static void write_nums(RgBuf *b, const double *v, int n, int dp)
+{
+    char t[32];
+    for (int i = 0; i < n; i++)
+        rg_buf_printf(b, "%s%s", i ? " " : "", rg_fmt(t, sizeof t, v[i], dp));
+}
+
+static void write_key(RgBuf *b, const RgJob *j, const Key *k)
+{
+    const char *field = (const char *)j + k->off;
+    char t[32];
+
+    switch (k->type) {
+    case K_IDENT:
+    case K_TEXT:
+        if (field[0])
+            rg_buf_printf(b, "%-15s = %s\n", k->key, field);
+        return;
+    case K_NUM: {
+        double v = *(const double *)(void *)field;
+        if (!isnan(v))
+            rg_buf_printf(b, "%-15s = %s\n", k->key, rg_fmt(t, sizeof t, v, 6));
+        return;
+    }
+    case K_INT:
+        rg_buf_printf(b, "%-15s = %d\n", k->key, *(const int *)(void *)field);
+        return;
+    case K_BOOL:
+        rg_buf_printf(b, "%-15s = %s\n", k->key, *(const bool *)(void *)field ? "yes" : "no");
+        return;
+    case K_START:
+        rg_buf_printf(b, "%-15s = %s\n", k->key, *(const bool *)(void *)field ? "top" : "bottom");
+        return;
+    case K_PART:
+        rg_buf_printf(b, "%-15s = %s\n", k->key, rg_part_name(*(const RgPartKind *)(void *)field));
+        return;
+    case K_VEC3: {
+        const RgVec3 *v = (const RgVec3 *)(void *)field;
+        if (isnan(v->x))
+            return;
+        double d[3] = { v->x, v->y, v->z };
+        rg_buf_printf(b, "%-15s = ", k->key);
+        write_nums(b, d, 3, 4);
+        rg_buf_puts(b, "\n");
+        return;
+    }
+    case K_QUAT: {
+        const RgQuat *q = (const RgQuat *)(void *)field;
+        double d[4] = { q->q1, q->q2, q->q3, q->q4 };
+        rg_buf_printf(b, "%-15s = ", k->key);
+        write_nums(b, d, 4, 6);
+        rg_buf_puts(b, "\n");
+        return;
+    }
+    case K_JOINTS:
+        rg_buf_printf(b, "%-15s = ", k->key);
+        write_nums(b, (const double *)(void *)field, 6, 4);
+        rg_buf_puts(b, "\n");
+        return;
+    case K_BAND:
+        for (int i = 0; i < j->nbands; i++) {
+            double d[2] = { j->bands[i].y0, j->bands[i].y1 };
+            rg_buf_printf(b, "%-15s = ", k->key);
+            write_nums(b, d, 2, 4);
+            rg_buf_puts(b, "\n");
+        }
+        return;
+    case K_STROKE:
+        for (int i = 0; i < j->nstrokes; i++) {
+            rg_buf_printf(b, "%-15s =", k->key);
+            for (int p = 0; p < j->strokes[i].n; p++) {
+                char x[32], y[32];
+                rg_buf_printf(b, "  %s %s", rg_fmt(x, sizeof x, j->strokes[i].pts[p].x, 3),
+                              rg_fmt(y, sizeof y, j->strokes[i].pts[p].y, 3));
+            }
+            rg_buf_puts(b, "\n");
+        }
+        return;
+    }
+}
+
+void rg_job_write(const RgJob *j, RgBuf *b)
+{
+    rg_buf_printf(b, "# rapidgen job file, written by %s %s\n", RAPIDGEN_NAME, RAPIDGEN_VERSION);
+    rg_buf_puts(b, "# Lines are  key = value ; # starts a comment. rapidgen --template\n"
+                   "# lists every setting and what it means.\n");
+    const char *group = NULL;
+    for (size_t i = 0; i < N_KEYS; i++) {
+        const Key *k = &keys[i];
+        bool cyl_only = k->group == G_CYL || k->type == K_BAND || k->type == K_START ||
+                        strcmp(k->key, "coats") == 0 || strcmp(k->key, "wrap_tolerance") == 0;
+        bool flat_only = k->group == G_FLAT || k->type == K_STROKE ||
+                         strcmp(k->key, "fan_along") == 0;
+        if ((cyl_only && j->part != RG_PART_CYLINDER) || (flat_only && j->part != RG_PART_FLAT))
+            continue;
+        if (k->type == K_STROKE && j->nstrokes == 0)
+            continue;
+        if (k->group != group) {
+            group = k->group;
+            rg_buf_printf(b, "\n# ---- %s\n", group);
+        }
+        write_key(b, j, k);
+    }
+}
+
+bool rg_job_save(const RgJob *j, const char *path, char *err, size_t errcap)
+{
+    RgBuf b;
+    rg_buf_init(&b);
+    rg_job_write(j, &b);
+    bool ok = !b.failed;
+    if (!ok)
+        snprintf(err, errcap, "out of memory");
+    else
+        ok = rg_write_file(path, b.s, b.len, err, errcap);
+    rg_buf_free(&b);
+    return ok;
+}
+
+/* ---- validation ----------------------------------------------------- */
 
 static bool missing(double v)
 {
@@ -366,14 +652,24 @@ bool rg_job_validate(const RgJob *j, char *err, size_t errcap)
     NEED(rg_robot_find(j->robot), "robot \"%s\" is not known (rapidgen --robots lists them)",
          j->robot);
 
-    NEED(j->drawing[0] || j->nbands, "give either drawing = FILE.dxf or one or more band lines");
-    NEED(!(j->drawing[0] && j->nbands), "give drawing or band lines, not both");
+    if (j->part == RG_PART_CYLINDER) {
+        NEED(j->drawing[0] || j->nbands, "give either drawing = FILE.dxf or one or more band lines");
+        NEED(!(j->drawing[0] && j->nbands), "give drawing or band lines, not both");
+        NEED(j->nstrokes == 0, "strokes are for flat parts: set part = flat, or remove them");
+        NEED(!missing(j->radius), "radius is required: the sprayed surface's radius in mm");
+        NEED(!missing(j->part_height), "part_height is required: table to top of the part in mm");
+        NEED(!missing(j->axis.x), "axis is required: the rotator axis at table height, x y z in "
+                                  "the robot base frame");
+        NEED(!missing(j->rpm), "rpm is required: the rotator speed");
+    } else {
+        NEED(j->nbands == 0, "bands are for cylinders: a flat part is sprayed along strokes");
+        NEED(!missing(j->plane.x), "plane is required: where the drawing's origin is on the "
+                                   "part, x y z in the robot base frame");
+        NEED(!missing(j->spray_speed), "spray_speed is required: the gun's speed along a "
+                                       "stroke, in mm/s");
+        NEED(j->nstrokes > 0, "there are no strokes: paint the pattern to spray");
+    }
 
-    NEED(!missing(j->radius), "radius is required: the sprayed surface's radius in mm");
-    NEED(!missing(j->part_height), "part_height is required: table to top of the part in mm");
-    NEED(!missing(j->axis.x), "axis is required: the rotator axis at table height, x y z in "
-                              "the robot base frame");
-    NEED(!missing(j->rpm), "rpm is required: the rotator speed");
     NEED(!missing(j->fan_width), "fan_width is required: the spray pattern's width at the "
                                  "standoff, in mm");
     NEED(!missing(j->standoff), "standoff is required: gun tip to surface in mm");
@@ -398,6 +694,8 @@ RgPose rg_job_tool(const RgJob *j)
 
 RgPose rg_job_wobj(const RgJob *j)
 {
+    if (j->part == RG_PART_FLAT)
+        return rg_pose(rg_m3_from_quat(j->plane_rot), j->plane);
     double yaw = atan2(-j->axis.y, -j->axis.x);
     return rg_pose(rg_rot_z(yaw), j->axis);
 }
@@ -434,17 +732,20 @@ const char *rg_job_template(void)
 "# One cylinder, standing on a rotator that turns continuously on its own.\n"
 "# The robot holds the gun square to the surface and traverses it up and down.\n"
 "# Millimetres, degrees, rpm. Lines are  key = value ; # starts a comment.\n"
+"# For a flat part painted with strokes, see  rapidgen --template flat\n"
 "\n"
 "# ---- what and where ------------------------------------------------------\n"
 "name        = TANK01          # module and file name (8 characters for S4/S4C)\n"
 "controller  = s4c_plus        # s4 | s4c | s4c_plus\n"
 "robot       = irb2400_16      # irb2400_16 | irb2400_10\n"
+"part        = cylinder        # cylinder | flat\n"
 "\n"
 "# Either a drawing of the unrolled surface: X round the circumference,\n"
 "# Y up the part from the table. Every closed outline must go all the way\n"
 "# round, because the robot cannot see which way the part is facing.\n"
 "#drawing    = tank01.dxf\n"
 "#layer      = SPRAY           # leave out to read every layer\n"
+"#drawing_scale = 1            # drawing units to millimetres\n"
 "# ...or the bands to coat, bottom and top height, one line each:\n"
 "band        = 100 900\n"
 "\n"
@@ -492,4 +793,63 @@ const char *rg_job_template(void)
 "wrap_tolerance = 5            # drawing width vs circumference\n"
 "join_tolerance = 0.1\n"
 "chord_tolerance = 0.2\n";
+}
+
+const char *rg_job_template_flat(void)
+{
+    return
+"# rapidgen job file: a flat part\n"
+"#\n"
+"# The part lies still. The gun points along the surface normal, `standoff`\n"
+"# above it, and follows the strokes in order. The editor paints strokes over\n"
+"# a DXF of the part; they can also be written here by hand.\n"
+"\n"
+"# ---- what and where ------------------------------------------------------\n"
+"name        = PANEL01\n"
+"controller  = s4c_plus        # s4 | s4c | s4c_plus\n"
+"robot       = irb2400_16\n"
+"part        = flat\n"
+"#drawing    = panel01.dxf     # the outline the strokes were traced over\n"
+"drawing_scale = 1             # drawing units to millimetres\n"
+"\n"
+"# ---- the part -------------------------------------------------------------\n"
+"# The drawing's origin on the part surface, in the robot base frame, and the\n"
+"# drawing's axes: plane_rot turns the base frame's X, Y, Z onto the drawing's\n"
+"# X, Y and the surface normal. 1 0 0 0 is a part lying flat, square to the\n"
+"# robot.\n"
+"plane       = 800 -300 200\n"
+"plane_rot   = 1 0 0 0\n"
+"spray_speed = 300             # along a stroke, mm/s\n"
+"\n"
+"# ---- the process ---------------------------------------------------------\n"
+"fan_width   = 80\n"
+"# The fan is a wide slot: a stroke has to run ACROSS it to lay down a band\n"
+"# that wide. fan_along is the fan's long axis in the drawing plane, in\n"
+"# degrees from X, so 90 suits strokes that run along X.\n"
+"fan_along   = 90\n"
+"overlap     = 50              # used by the editor's fill tool\n"
+"standoff    = 200\n"
+"approach    = 100             # lift before and after each stroke\n"
+"travel_speed    = 250\n"
+"approach_speed  = 100\n"
+"max_spray_speed = 500\n"
+"\n"
+"# ---- the gun --------------------------------------------------------------\n"
+"tool        = tSprayGun\n"
+"tool_define = no\n"
+"tool_tcp    = 0 -120 180\n"
+"# The gun tilted 60 deg off the flange axis, and turned 90 deg about its own\n"
+"# axis so the fan lies across the passes. Turning the fan without turning the\n"
+"# gun on its mount turns the wrist with it, and that runs into the wrist\n"
+"# singularity here.\n"
+"tool_rot    = 0.612372 0.353553 -0.353553 0.612372\n"
+"\n"
+"# ---- around the program ---------------------------------------------------\n"
+"home         = 0 0 0 0 30 0\n"
+"ready_prompt = yes\n"
+"gun_signal   = doGunOn        # required for two or more strokes\n"
+"\n"
+"# ---- the painted strokes, in order: x y pairs in drawing mm ----------------\n"
+"stroke = 50 50  550 50  550 130  50 130\n"
+"stroke = 50 300  550 300\n";
 }
