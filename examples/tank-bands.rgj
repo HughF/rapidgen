@@ -1,0 +1,27 @@
+# rapidgen example: one band written directly, no drawing.
+# See `rapidgen --template` for every setting and what it means.
+
+name        = TANK01
+controller  = s4c_plus
+robot       = irb2400_16
+band        = 100 900
+
+radius      = 300
+part_height = 1000
+axis        = 1450 0 300
+azimuth     = 0
+rpm         = 30
+
+fan_width   = 100
+overlap     = 50
+standoff    = 250
+coats       = 2
+start       = top
+
+tool        = tSprayGun
+tool_define = no
+tool_tcp    = 0 -120 180
+tool_rot    = 0.866025 0.5 0 0
+
+home         = 0 0 0 0 30 0
+ready_prompt = yes

@@ -1,0 +1,55 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Hugh Frater
+ *
+ * rapidgen.rc — Windows resources: icon, version stamp, manifest.
+ *
+ * The strings come from rg_version.h itself, so the version on the file's
+ * Properties tab is the one the About dialog shows. FILEVERSION takes four
+ * integers rather than a string, and those are passed in by the Makefile,
+ * which has already split the date and stripped the leading zeros — the
+ * resource compiler reads 08 as a malformed octal constant.
+ */
+#include <windows.h>
+#include "rg_version.h"
+
+#ifndef RG_VER_A
+#define RG_VER_A 0
+#define RG_VER_B 0
+#define RG_VER_C 0
+#endif
+#ifndef RG_VER_D
+#define RG_VER_D 0
+#endif
+
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "rapidgen.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    RG_VER_A, RG_VER_B, RG_VER_C, RG_VER_D
+PRODUCTVERSION RG_VER_A, RG_VER_B, RG_VER_C, RG_VER_D
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080904b0"          /* UK English, Unicode */
+        BEGIN
+            VALUE "CompanyName",      "Hugh Frater"
+            VALUE "FileDescription",  RAPIDGEN_TAGLINE
+            VALUE "FileVersion",      RAPIDGEN_VERSION
+            VALUE "InternalName",     RAPIDGEN_NAME
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Hugh Frater. GPL-3.0-or-later."
+            VALUE "OriginalFilename", "rapidgen.exe"
+            VALUE "ProductName",      RAPIDGEN_NAME
+            VALUE "ProductVersion",   RAPIDGEN_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x809, 1200
+    END
+END

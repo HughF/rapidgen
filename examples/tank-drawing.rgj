@@ -1,0 +1,26 @@
+# rapidgen example: the band comes from a DXF of the unrolled surface.
+# tank02.dxf is 1884.96 mm wide (2 x pi x 300) and 800 mm tall, starting
+# 100 mm above the table, on layer SPRAY. For an S4C, so the name fits 8.3.
+
+name        = TANK02
+controller  = s4c
+robot       = irb2400_16
+drawing     = tank02.dxf
+layer       = SPRAY
+
+radius      = 300
+part_height = 1000
+axis        = 1450 0 300
+rpm         = 30
+
+fan_width   = 100
+overlap     = 50
+standoff    = 250
+coats       = 2
+
+tool        = tSprayGun
+tool_define = yes
+tool_tcp    = 0 -120 180
+tool_rot    = 0.866025 0.5 0 0
+tool_mass   = 2.5
+tool_cog    = 0 -40 80
