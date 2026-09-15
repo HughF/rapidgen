@@ -17,6 +17,8 @@ Either way, rapidgen works out the motion, follows every move through the
 robot's kinematics, and then writes the program or refuses it with the reason
 and how far off it was.
 
+![The editor's Draw page: a flat panel's drawing with the pattern painted over it, each stroke drawn as the band the spray fan covers](docs/screenshots/draw-page.png)
+
 > **Status.** Tested against its own unit tests (ASan + UBSan), and the editor
 > has been driven and screenshotted under a virtual display. The Windows build
 > has been run under Wine. **No generated program has been loaded onto an S4
