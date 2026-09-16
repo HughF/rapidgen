@@ -61,6 +61,21 @@
 
 typedef enum { RG_PART_CYLINDER = 0, RG_PART_FLAT, RG_PART_COUNT } RgPartKind;
 
+/*
+ * What the gun lays down. A thermal-spray torch puts down a round spot, so
+ * turning the gun about its own axis changes nothing and the sprayed strip is
+ * the path swept by a disc. A paint gun's fan is a wide slot, which has to be
+ * held across the direction of travel to lay a band its full width.
+ */
+typedef enum { RG_PAT_SPOT = 0, RG_PAT_FAN } RgPattern;
+
+/*
+ * A plasma or HVOF torch runs continuously — it cannot be switched stroke by
+ * stroke, so whatever passes under it is coated. A paint gun, or a powder
+ * feeder with its own valve, can be switched from the program.
+ */
+typedef enum { RG_GUN_CONTINUOUS = 0, RG_GUN_SWITCHED } RgGunKind;
+
 typedef struct { double y0, y1; } RgBand;
 
 /* A path the gun follows with the spray on, in drawing millimetres. */
@@ -94,13 +109,22 @@ typedef struct {
     double spray_speed;               /* along a stroke, mm/s                   */
 
     /* The process */
-    double fan_width;                 /* spray pattern width at the standoff */
-    double fan_along;                 /* flat: the fan's long axis in the drawing
+    RgPattern pattern;                /* spot (thermal spray) or fan (paint) */
+    double spot_diameter;             /* spot: the coated circle at the standoff */
+    double fan_width;                 /* fan: pattern width at the standoff  */
+    double fan_along;                 /* fan: its long axis in the drawing
                                          plane, degrees from X. A stroke should
                                          run across it, not along it. */
-    double overlap;                   /* percent of the fan width covered again */
+    double step_over;                 /* between passes; unset: from overlap */
+    double overlap;                   /* percent of the width covered again  */
     double standoff;                  /* gun tip to surface                */
     int    coats;                     /* cylinder: traverses per band      */
+    int    cycles;                    /* repeats of the whole pattern      */
+    double dwell;                     /* seconds between cycles, to let the part cool */
+    double thickness_per_pass;        /* microns a single pass lays down, measured */
+    double target_thickness;          /* microns wanted, for working out cycles    */
+    double lead;                      /* flat: run-on and run-off past a stroke's
+                                         ends; unset: worked out from the speed  */
     bool   start_top;                 /* cylinder: first traverse downwards */
     double accel;                     /* robot acceleration assumed for run-up */
     double approach;                  /* clearance before and after spraying */
@@ -115,9 +139,11 @@ typedef struct {
     RgVec3 tool_cog;
 
     /* Around the program */
-    double home[6];                   /* joint angles, start and end       */
-    bool   ready_prompt;              /* ask the operator before spraying  */
-    char   gun_signal[RG_IDENT_CAP];  /* digital output; empty for none    */
+    double    home[6];                /* joint angles, start and end       */
+    bool      ready_prompt;           /* ask the operator before spraying  */
+    RgGunKind gun;                    /* continuous, or switched by the program */
+    char      gun_signal[RG_IDENT_CAP];  /* the output that switches it    */
+    char      cool_signal[RG_IDENT_CAP]; /* held on through the dwell      */
 
     /* Rules the plan must keep */
     double min_wrist;                 /* |axis 5| from straight            */
@@ -165,6 +191,12 @@ const char *rg_job_template(void);
 const char *rg_job_template_flat(void);
 
 const char *rg_part_name(RgPartKind k);
+
+/* What the gun covers as it passes: the spot's diameter, or the fan's width. */
+double rg_job_width(const RgJob *j);
+
+/* Between one pass and the next: step_over, or what the overlap works out to. */
+double rg_job_step(const RgJob *j);
 
 /* The gun's tooldata frame, and the work object in the robot base frame. */
 RgPose rg_job_tool(const RgJob *j);

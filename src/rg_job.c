@@ -43,17 +43,25 @@ void rg_job_default(RgJob *j)
     j->plane_rot.q1 = 1.0;
     j->spray_speed = UNSET;
 
+    j->pattern = RG_PAT_SPOT;
+    j->spot_diameter = UNSET;
     j->fan_width = UNSET;
     j->fan_along = 90.0;
+    j->step_over = UNSET;
     j->overlap = 50.0;
     j->standoff = UNSET;
     j->coats = 1;
+    j->cycles = 1;
+    j->dwell = 0.0;
+    j->thickness_per_pass = UNSET;
+    j->target_thickness = UNSET;
+    j->lead = UNSET;
     j->start_top = true;
-    j->accel = 500.0;
+    j->accel = 2000.0;
     j->approach = 150.0;
     j->travel_speed = 250.0;
     j->approach_speed = 100.0;
-    j->max_spray_speed = 500.0;
+    j->max_spray_speed = 1000.0;
 
     j->tool_define = false;
     j->tool_tcp = rg_v3(UNSET, UNSET, UNSET);
@@ -62,6 +70,7 @@ void rg_job_default(RgJob *j)
 
     j->home[4] = 30.0;
     j->ready_prompt = true;
+    j->gun = RG_GUN_CONTINUOUS;
 
     j->min_wrist = 10.0;
     j->min_margin = 5.0;
@@ -128,11 +137,23 @@ const char *rg_part_name(RgPartKind k)
     return k == RG_PART_FLAT ? "flat" : "cylinder";
 }
 
+double rg_job_width(const RgJob *j)
+{
+    return j->pattern == RG_PAT_FAN ? j->fan_width : j->spot_diameter;
+}
+
+double rg_job_step(const RgJob *j)
+{
+    if (!isnan(j->step_over))
+        return j->step_over;
+    return rg_job_width(j) * (1.0 - j->overlap / 100.0);
+}
+
 /* ---- the key table -------------------------------------------------- */
 
 typedef enum {
     K_IDENT, K_TEXT, K_NUM, K_INT, K_BOOL, K_VEC3, K_QUAT, K_JOINTS, K_BAND,
-    K_START, K_PART, K_STROKE
+    K_START, K_PART, K_STROKE, K_PATTERN, K_GUN
 } KType;
 
 typedef struct {
@@ -175,11 +196,19 @@ static const Key keys[] = {
     { "plane_rot",       K_QUAT,   F(plane_rot),       0,               -1, 1, G_FLAT },
     { "spray_speed",     K_NUM,    F(spray_speed),     0,               1, 2000, G_FLAT },
 
+    { "pattern",         K_PATTERN, F(pattern),        0,               0, 0, G_PROC },
+    { "spot_diameter",   K_NUM,    F(spot_diameter),   0,               0.5, 200, G_PROC },
     { "fan_width",       K_NUM,    F(fan_width),       0,               5, 1000, G_PROC },
     { "fan_along",       K_NUM,    F(fan_along),       0,               -180, 180, G_PROC },
+    { "step_over",       K_NUM,    F(step_over),       0,               0.1, 1000, G_PROC },
     { "overlap",         K_NUM,    F(overlap),         0,               0, 90, G_PROC },
     { "standoff",        K_NUM,    F(standoff),        0,               10, 1000, G_PROC },
     { "coats",           K_INT,    F(coats),           0,               1, 50, G_PROC },
+    { "cycles",          K_INT,    F(cycles),          0,               1, 999, G_PROC },
+    { "dwell",           K_NUM,    F(dwell),           0,               0, 600, G_PROC },
+    { "thickness_per_pass", K_NUM, F(thickness_per_pass), 0,            0.01, 5000, G_PROC },
+    { "target_thickness", K_NUM,   F(target_thickness), 0,              0.1, 100000, G_PROC },
+    { "lead",            K_NUM,    F(lead),            0,               0, 1000, G_PROC },
     { "start",           K_START,  F(start_top),       0,               0, 0, G_PROC },
     { "accel",           K_NUM,    F(accel),           0,               10, 20000, G_PROC },
     { "approach",        K_NUM,    F(approach),        0,               20, 1000, G_PROC },
@@ -196,7 +225,9 @@ static const Key keys[] = {
 
     { "home",            K_JOINTS, F(home),            0,               -400, 400, G_PROG },
     { "ready_prompt",    K_BOOL,   F(ready_prompt),    0,               0, 0, G_PROG },
+    { "gun",             K_GUN,    F(gun),             0,               0, 0, G_PROG },
     { "gun_signal",      K_IDENT,  F(gun_signal),      S(gun_signal),   0, 0, G_PROG },
+    { "cool_signal",     K_IDENT,  F(cool_signal),     S(cool_signal),  0, 0, G_PROG },
 
     { "min_wrist",       K_NUM,    F(min_wrist),       0,               0, 60, G_RULES },
     { "min_margin",      K_NUM,    F(min_margin),      0,               0, 45, G_RULES },
@@ -353,6 +384,28 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
             *(RgPartKind *)field = RG_PART_FLAT;
         else {
             snprintf(why, whycap, "expected cylinder or flat");
+            return false;
+        }
+        return true;
+
+    case K_PATTERN:
+        if (rg_streqi(v, "spot"))
+            *(RgPattern *)field = RG_PAT_SPOT;
+        else if (rg_streqi(v, "fan"))
+            *(RgPattern *)field = RG_PAT_FAN;
+        else {
+            snprintf(why, whycap, "expected spot or fan");
+            return false;
+        }
+        return true;
+
+    case K_GUN:
+        if (rg_streqi(v, "continuous"))
+            *(RgGunKind *)field = RG_GUN_CONTINUOUS;
+        else if (rg_streqi(v, "switched"))
+            *(RgGunKind *)field = RG_GUN_SWITCHED;
+        else {
+            snprintf(why, whycap, "expected continuous or switched");
             return false;
         }
         return true;
@@ -548,6 +601,15 @@ static void write_key(RgBuf *b, const RgJob *j, const Key *k)
     case K_PART:
         rg_buf_printf(b, "%-15s = %s\n", k->key, rg_part_name(*(const RgPartKind *)(void *)field));
         return;
+    case K_PATTERN:
+        rg_buf_printf(b, "%-15s = %s\n", k->key,
+                      *(const RgPattern *)(void *)field == RG_PAT_FAN ? "fan" : "spot");
+        return;
+    case K_GUN:
+        rg_buf_printf(b, "%-15s = %s\n", k->key,
+                      *(const RgGunKind *)(void *)field == RG_GUN_SWITCHED ? "switched"
+                                                                           : "continuous");
+        return;
     case K_VEC3: {
         const RgVec3 *v = (const RgVec3 *)(void *)field;
         if (isnan(v->x))
@@ -604,7 +666,11 @@ void rg_job_write(const RgJob *j, RgBuf *b)
         bool cyl_only = k->group == G_CYL || k->type == K_BAND || k->type == K_START ||
                         strcmp(k->key, "coats") == 0 || strcmp(k->key, "wrap_tolerance") == 0;
         bool flat_only = k->group == G_FLAT || k->type == K_STROKE ||
-                         strcmp(k->key, "fan_along") == 0;
+                         strcmp(k->key, "lead") == 0;
+        bool fan_only = strcmp(k->key, "fan_width") == 0 || strcmp(k->key, "fan_along") == 0;
+        bool spot_only = strcmp(k->key, "spot_diameter") == 0;
+        if ((fan_only && j->pattern != RG_PAT_FAN) || (spot_only && j->pattern != RG_PAT_SPOT))
+            continue;
         if ((cyl_only && j->part != RG_PART_CYLINDER) || (flat_only && j->part != RG_PART_FLAT))
             continue;
         if (k->type == K_STROKE && j->nstrokes == 0)
@@ -670,9 +736,19 @@ bool rg_job_validate(const RgJob *j, char *err, size_t errcap)
         NEED(j->nstrokes > 0, "there are no strokes: paint the pattern to spray");
     }
 
-    NEED(!missing(j->fan_width), "fan_width is required: the spray pattern's width at the "
-                                 "standoff, in mm");
+    if (j->pattern == RG_PAT_SPOT)
+        NEED(!missing(j->spot_diameter), "spot_diameter is required: the circle the gun coats "
+                                         "at the standoff, in mm");
+    else
+        NEED(!missing(j->fan_width), "fan_width is required: the fan's width at the standoff, "
+                                     "in mm");
     NEED(!missing(j->standoff), "standoff is required: gun tip to surface in mm");
+    NEED(rg_job_step(j) > 0.0, "step_over must be more than nothing");
+    NEED(rg_job_step(j) <= rg_job_width(j) + 1e-9,
+         "step_over %.2f mm is wider than the %.2f mm the gun covers: the passes would not "
+         "meet", rg_job_step(j), rg_job_width(j));
+    NEED(j->gun != RG_GUN_SWITCHED || j->gun_signal[0],
+         "gun = switched needs gun_signal: the output the program switches the gun with");
 
     NEED(j->tool[0], "tool is required: the tooldata the program moves");
     NEED(!missing(j->tool_tcp.x), "tool_tcp is required: the gun tip in the flange frame, "
@@ -757,16 +833,24 @@ const char *rg_job_template(void)
 "rpm         = 30              # rotator speed\n"
 "\n"
 "# ---- the process ---------------------------------------------------------\n"
-"fan_width   = 100             # spray pattern width at the standoff\n"
-"overlap     = 50              # percent of the fan width covered again each turn\n"
-"standoff    = 250             # gun tip to surface\n"
-"coats       = 2               # traverses over each band\n"
+"# A thermal-spray torch lays down a round spot, so the gun's rotation about\n"
+"# its own axis does not matter. step_over is the advance per turn of the\n"
+"# part; the spot covers each point spot_diameter / step_over times.\n"
+"pattern     = spot            # spot (thermal spray) | fan (paint)\n"
+"spot_diameter = 12            # the circle coated at the standoff\n"
+"step_over   = 6               # between passes; leave out to use overlap\n"
+"standoff    = 150             # gun tip to surface\n"
+"coats       = 2               # traverses over each band, per cycle\n"
+"cycles      = 8               # repeats of the whole pattern, building thickness\n"
+"dwell       = 20              # seconds between cycles, to let the part cool\n"
+"thickness_per_pass = 25       # microns a single pass lays down, as measured\n"
+"target_thickness   = 350      # microns wanted\n"
 "start       = top             # top | bottom\n"
 "approach    = 150             # radial clearance before and after a band\n"
-"accel       = 500             # assumed robot acceleration, for the run-up\n"
+"accel       = 2000            # assumed robot acceleration, for the run-up\n"
 "travel_speed    = 250\n"
 "approach_speed  = 100\n"
-"max_spray_speed = 500\n"
+"max_spray_speed = 1000\n"
 "\n"
 "# ---- the gun --------------------------------------------------------------\n"
 "# The tool's Z axis is the spray direction and its X axis the long axis of\n"
@@ -782,7 +866,9 @@ const char *rg_job_template(void)
 "# ---- around the program ---------------------------------------------------\n"
 "home         = 0 0 0 0 30 0\n"
 "ready_prompt = yes            # stop for the operator before the first traverse\n"
-"#gun_signal  = doGunOn        # a digital output; required for two or more bands\n"
+"gun          = continuous     # continuous (a torch) | switched (needs gun_signal)\n"
+"#gun_signal  = doGunOn        # the output that switches the gun\n"
+"#cool_signal = doCoolAir      # held on through the dwell between cycles\n"
 "\n"
 "# ---- rules the plan must keep ---------------------------------------------\n"
 "min_wrist      = 10           # axis 5 at least this far from straight\n"
@@ -822,17 +908,25 @@ const char *rg_job_template_flat(void)
 "spray_speed = 300             # along a stroke, mm/s\n"
 "\n"
 "# ---- the process ---------------------------------------------------------\n"
-"fan_width   = 80\n"
-"# The fan is a wide slot: a stroke has to run ACROSS it to lay down a band\n"
-"# that wide. fan_along is the fan's long axis in the drawing plane, in\n"
-"# degrees from X, so 90 suits strokes that run along X.\n"
-"fan_along   = 90\n"
-"overlap     = 50              # used by the editor's fill tool\n"
-"standoff    = 200\n"
+"# A thermal-spray torch lays down a round spot: which way round the gun sits\n"
+"# does not matter, and a stroke may run any direction. The coating is built\n"
+"# up over `cycles` repeats of the whole pattern.\n"
+"pattern     = spot            # spot (thermal spray) | fan (paint)\n"
+"spot_diameter = 12            # the circle coated at the standoff\n"
+"step_over   = 6               # between passes; the fill tool uses it\n"
+"standoff    = 150\n"
+"cycles      = 6               # repeats of the whole pattern\n"
+"dwell       = 15              # seconds between cycles, to let the part cool\n"
+"thickness_per_pass = 25       # microns a single pass lays down, as measured\n"
+"target_thickness   = 300      # microns wanted\n"
+"#lead       = 70              # run-on and run-off past each stroke's ends;\n"
+"                              # left out, it is worked out from speed and\n"
+"                              # acceleration so the gun is up to speed on the work\n"
 "approach    = 100             # lift before and after each stroke\n"
+"accel       = 2000\n"
 "travel_speed    = 250\n"
 "approach_speed  = 100\n"
-"max_spray_speed = 500\n"
+"max_spray_speed = 1000\n"
 "\n"
 "# ---- the gun --------------------------------------------------------------\n"
 "tool        = tSprayGun\n"
@@ -847,7 +941,9 @@ const char *rg_job_template_flat(void)
 "# ---- around the program ---------------------------------------------------\n"
 "home         = 0 0 0 0 30 0\n"
 "ready_prompt = yes\n"
-"gun_signal   = doGunOn        # required for two or more strokes\n"
+"gun          = continuous     # a torch cannot be switched stroke by stroke\n"
+"#gun_signal  = doGunOn        # only for gun = switched\n"
+"#cool_signal = doCoolAir      # held on through the dwell between cycles\n"
 "\n"
 "# ---- the painted strokes, in order: x y pairs in drawing mm ----------------\n"
 "stroke = 50 50  550 50  550 130  50 130\n"

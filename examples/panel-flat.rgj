@@ -15,11 +15,16 @@ drawing_scale = 1
 
 plane         = 800 -300 200
 plane_rot     = 1 0 0 0
-spray_speed   = 300
+spray_speed   = 500
 
-fan_width     = 80
-overlap       = 50
-standoff      = 200
+pattern       = spot
+spot_diameter = 12
+step_over     = 6
+standoff      = 150
+cycles        = 6
+dwell         = 15
+thickness_per_pass = 25
+target_thickness   = 300
 approach      = 100
 
 tool          = tSprayGun
@@ -31,7 +36,7 @@ tool_rot      = 0.612372 0.353553 -0.353553 0.612372
 
 home          = 0 0 0 0 30 0
 ready_prompt  = yes
-gun_signal    = doGunOn
+gun           = continuous
 
 stroke = 40 40  460 40  460 260  40 260  40 40
 stroke = 60 80  440 80  440 110  60 110

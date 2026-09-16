@@ -243,17 +243,45 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     bool prompt = false;
     for (int i = 0; i < pl->nmoves; i++)
         prompt |= pl->moves[i].after == RG_ACT_READY;
+    bool loop = pl->cycles > 1;
 
     rg_buf_puts(out, "\n  PROC main()\n");
     if (prompt)
-        rg_buf_puts(out, "    VAR num nKey;\n\n");
+        rg_buf_puts(out, "    VAR num nKey;\n");
+    if (loop)
+        rg_buf_puts(out, "    VAR num nCycle;\n");
+    if (prompt || loop)
+        rg_buf_puts(out, "\n");
     rg_buf_puts(out, "    ConfJ \\Off;\n    ConfL \\Off;\n");
 
+    /* The pattern is written once and repeated, rather than its targets
+     * written out again per cycle: a coating can take dozens of cycles, and
+     * an S4's program memory is not large. */
+    const char *in = loop ? "    " : "";
     for (int i = 0; i < pl->nmoves; i++) {
         const RgMove *m = &pl->moves[i];
         const char *zone = m->zone == RG_Z_FINE ? "fine" : m->zone == RG_Z_SMALL ? "z1" : "z10";
+        if (loop && i == 1) {
+            char n[32];
+            rg_buf_printf(out, "    ! %s cycles, building the coating up\n",
+                          rg_fmt(n, sizeof n, (double)pl->cycles, 0));
+            rg_buf_printf(out, "    FOR nCycle FROM 1 TO %d DO\n", pl->cycles);
+        }
+        if (loop && m->kind == RG_MV_HOME && i > 0) {
+            if (j->dwell > 0.0) {
+                char secs[32];
+                if (j->cool_signal[0])
+                    rg_buf_printf(out, "      SetDO %s,1;\n", j->cool_signal);
+                rg_buf_printf(out, "      WaitTime %s;\n", rg_fmt(secs, sizeof secs, j->dwell, 2));
+                if (j->cool_signal[0])
+                    rg_buf_printf(out, "      SetDO %s,0;\n", j->cool_signal);
+            }
+            rg_buf_puts(out, "    ENDFOR\n");
+        }
         if (m->note[0])
-            rg_buf_printf(out, "    ! %s\n", m->note);
+            rg_buf_printf(out, "%s    ! %s\n", loop && i > 0 && i < pl->nmoves - 1 ? "  " : "",
+                          m->note);
+        (void)in;
         switch (m->kind) {
         case RG_MV_HOME:
             if (d->moveabsj) {

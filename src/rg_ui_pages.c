@@ -294,10 +294,43 @@ static void settings_process(RgUi *ui)
     RgJob *j = &ui->job;
     ui_gap(ui, 6);
     ui_section(ui, "The process");
-    number(ui, "Fan width", "The spray pattern's width at the standoff", &j->fan_width, 80, 5,
-           1000, 1, "mm");
-    ui_prop(ui, "Overlap", "How much of the fan each pass covers again", &j->overlap, 0, 90, 1, "%");
-    number(ui, "Standoff", "Gun tip to the surface", &j->standoff, 200, 10, 1000, 5, "mm");
+
+    static const char *patterns[] = { "Round spot (thermal spray)", "Fan (paint)" };
+    int pick = choose(ui, "Pattern", "A thermal-spray torch lays down a round spot, so the "
+                      "gun's rotation does not matter and a stroke may run any way. A paint "
+                      "fan is a slot that has to run across the direction of travel",
+                      patterns, 2, (int)j->pattern);
+    if (pick >= 0)
+        j->pattern = (RgPattern)pick;
+
+    if (j->pattern == RG_PAT_SPOT) {
+        number(ui, "Spot diameter", "The circle the gun coats at the standoff",
+               &j->spot_diameter, 12, 0.5, 200, 0.5, "mm");
+    } else {
+        number(ui, "Fan width", "The fan's width at the standoff", &j->fan_width, 80, 5,
+               1000, 1, "mm");
+        number(ui, "Fan angle", "Which way the fan's long axis lies in the drawing",
+               &j->fan_along, 90, -180, 180, 5, "deg");
+    }
+    double step = rg_job_step(j);
+    if (!isnan(step) && ui_prop(ui, "Step-over", "The advance between one pass and the next; "
+                                "each point is covered width / step-over times", &step, 0.1,
+                                1000, 0.5, "mm"))
+        j->step_over = step;
+    number(ui, "Standoff", "Gun tip to the surface", &j->standoff, 150, 10, 1000, 5, "mm");
+    ui_prop_int(ui, "Cycles", "Repeats of the whole pattern: a coating is built up over many "
+                "passes", &j->cycles, 1, 999, "");
+    ui_prop(ui, "Dwell", "Seconds between cycles, to let the part cool. Part temperature "
+            "itself is not modelled", &j->dwell, 0, 600, 1, "s");
+    number(ui, "Per pass", "Microns a single pass lays down, as you have measured it. Used "
+           "only to work the thickness out, never to decide anything", &j->thickness_per_pass,
+           25, 0.01, 5000, 1, "um");
+    number(ui, "Target", "The coating thickness wanted, in microns", &j->target_thickness,
+           300, 0.1, 100000, 10, "um");
+    if (j->part == RG_PART_FLAT)
+        number(ui, "Run on/off", "How far past each end of a stroke the gun runs, so it is up "
+               "to speed over the work. Left unset it is worked out from the speed and the "
+               "acceleration", &j->lead, 70, 0, 1000, 5, "mm");
     ui_prop(ui, "Approach", "How far the gun stands back before and after spraying", &j->approach,
             20, 1000, 5, "mm");
     ui_prop(ui, "Travel speed", "Between the parts of the program, in the air",
@@ -351,9 +384,18 @@ static void settings_program(RgUi *ui)
     }
     ui_check(ui, "Ask the operator before spraying", "Stop at the start of the first band or "
              "stroke with a pendant prompt, so the rotator and gun can be started", &j->ready_prompt);
-    text_field(ui, "Gun output", "A digital output the program sets while spraying. Needed for "
-               "more than one band or stroke; empty when the gun is switched from outside",
-               j->gun_signal, sizeof j->gun_signal);
+
+    static const char *guns[] = { "Runs continuously (a torch)", "Switched by the program" };
+    int pick = choose(ui, "Gun", "A plasma or HVOF torch cannot be switched stroke by stroke, "
+                      "so whatever passes under it is coated. A paint gun, or a powder feeder "
+                      "with its own valve, can be switched", guns, 2, (int)j->gun);
+    if (pick >= 0)
+        j->gun = (RgGunKind)pick;
+    if (j->gun == RG_GUN_SWITCHED)
+        text_field(ui, "Gun output", "The digital output the program switches the gun with",
+                   j->gun_signal, sizeof j->gun_signal);
+    text_field(ui, "Cooling output", "Held on through the dwell between cycles, for a cooling "
+               "jet; leave empty for none", j->cool_signal, sizeof j->cool_signal);
 }
 
 static void settings_rules(RgUi *ui)

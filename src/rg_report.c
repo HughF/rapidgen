@@ -17,6 +17,9 @@
 
 #include <float.h>
 
+static void gun_line(RgBuf *b, const RgJob *j, const RgPlan *pl);
+static void coating_line(RgBuf *b, const RgJob *j, const RgPlan *pl);
+
 static void issues(RgBuf *b, const RgPlan *pl, RgSeverity sev, const char *title)
 {
     if (!rg_plan_count(pl, sev))
@@ -31,30 +34,68 @@ static void cylinder(RgBuf *b, const RgJob *j, const RgPlan *pl)
 {
     rg_buf_printf(b, "Cylinder    radius %.1f mm, %.1f mm round, %.1f mm tall\n",
                   j->radius, pl->circumference, j->part_height);
-    rg_buf_printf(b, "Rotator     %.1f rpm, turning on its own\n", j->rpm);
-    rg_buf_printf(b, "Spray       fan %.1f mm at %.1f mm standoff, %.0f %% overlap\n",
-                  j->fan_width, j->standoff, j->overlap);
-    rg_buf_printf(b, "            pitch %.1f mm per turn, traverse %.2f mm/s\n",
+    rg_buf_printf(b, "Rotator     %.1f rpm, turning on its own; the surface passes the gun at\n"
+                     "            %.2f m/s\n", j->rpm, pl->surface_speed / 1000.0);
+    gun_line(b, j, pl);
+    rg_buf_printf(b, "            %.1f mm per turn, traverse %.2f mm/s\n",
                   pl->pitch, pl->spray_speed);
     rg_buf_printf(b, "            run-up %.1f mm; the gun turns %.1f mm past each band edge\n",
                   pl->runup, pl->overrun);
     for (int i = 0; i < pl->nbands; i++)
         rg_buf_printf(b, "%s %2d: %.1f - %.1f mm, %d coat%s\n", i ? "           " : "Bands      ",
                       i + 1, pl->bands[i].y0, pl->bands[i].y1, j->coats, j->coats == 1 ? "" : "s");
+    coating_line(b, j, pl);
     if (pl->spray_time > 0.0)
-        rg_buf_printf(b, "Spraying    %.0f s, %.1f turns of the part\n",
-                      pl->spray_time, pl->spray_time * j->rpm / 60.0);
+        rg_buf_printf(b, "            %.1f turns of the part\n", pl->spray_time * j->rpm / 60.0);
+}
+
+static void gun_line(RgBuf *b, const RgJob *j, const RgPlan *pl)
+{
+    if (j->pattern == RG_PAT_SPOT)
+        rg_buf_printf(b, "Gun         %.1f mm spot at %.1f mm standoff, %.1f mm step-over\n"
+                         "            (%.1f passes over each point), %s\n",
+                      j->spot_diameter, j->standoff, pl->pitch, pl->passes_per_point,
+                      j->gun == RG_GUN_CONTINUOUS ? "running continuously"
+                                                  : "switched by the program");
+    else
+        rg_buf_printf(b, "Gun         %.1f mm fan at %.1f mm standoff, %.1f mm step-over\n"
+                         "            (%.1f passes over each point), %s\n",
+                      j->fan_width, j->standoff, pl->pitch, pl->passes_per_point,
+                      j->gun == RG_GUN_CONTINUOUS ? "running continuously"
+                                                  : "switched by the program");
+}
+
+static void coating_line(RgBuf *b, const RgJob *j, const RgPlan *pl)
+{
+    if (pl->cycles > 1 || pl->dwell > 0.0)
+        rg_buf_printf(b, "Cycles      %d, %.0f s apart\n", pl->cycles, pl->dwell);
+    if (pl->thickness_total > 0.0) {
+        rg_buf_printf(b, "Thickness   about %.0f um: %.0f um a cycle from the %.1f um a pass "
+                         "you measured\n", pl->thickness_total, pl->thickness_cycle,
+                      j->thickness_per_pass);
+        if (!isnan(j->target_thickness))
+            rg_buf_printf(b, "            %.0f um wanted; %d cycle%s would reach it\n",
+                          j->target_thickness, pl->cycles_for_target,
+                          pl->cycles_for_target == 1 ? "" : "s");
+    }
+    if (pl->spray_time > 0.0) {
+        double total = pl->spray_time + pl->dwell * (pl->cycles - 1);
+        rg_buf_printf(b, "Spraying    %.0f s a cycle, %.0f s in all%s\n", pl->cycle_time,
+                      total, pl->dwell > 0.0 ? " including the dwells" : "");
+    }
 }
 
 static void flat(RgBuf *b, const RgJob *j, const RgPlan *pl)
 {
     rg_buf_printf(b, "Part        flat; the drawing's origin is at [%.1f, %.1f, %.1f] in the\n"
                      "            robot base frame\n", j->plane.x, j->plane.y, j->plane.z);
-    rg_buf_printf(b, "Strokes     %d, %.0f mm in all, at %.0f mm/s\n", j->nstrokes,
+    rg_buf_printf(b, "Strokes     %d, %.0f mm a cycle, at %.0f mm/s\n", j->nstrokes,
                   pl->stroke_length, pl->spray_speed);
-    rg_buf_printf(b, "Spray       fan %.1f mm at %.1f mm standoff\n", j->fan_width, j->standoff);
-    if (pl->spray_time > 0.0)
-        rg_buf_printf(b, "Spraying    %.0f s along the strokes\n", pl->spray_time);
+    gun_line(b, j, pl);
+    if (pl->lead_used > 0.0)
+        rg_buf_printf(b, "Run on/off  %.1f mm at each end (%.1f mm needed to reach speed)\n",
+                      pl->lead_used, pl->lead_needed);
+    coating_line(b, j, pl);
 }
 
 void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
@@ -106,7 +147,10 @@ void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
         "    cell: only the wrist centre, flange and gun tip are kept clear of the part\n"
         "  - the IRB 2400's axis 2/3 interaction limit\n"
         "  - the controller's own corner blending and speed near the stops\n"
-        "  - film thickness: %s set it, the spray process decides it\n"
+        "  - the part's temperature: a coating is built up hot, and nothing here\n"
+        "    models interpass temperature or how well the dwell cools it\n"
+        "  - coating thickness beyond the arithmetic above, which is your own\n"
+        "    measured figure per pass multiplied out: %s set it, the process decides it\n"
         "  - that the program loads: the file format is not yet checked on an S4\n"
         "\nRun it in simulation first, then step through it in manual reduced speed.\n",
         j->part == RG_PART_FLAT ? "its fixture" : "the rotator",

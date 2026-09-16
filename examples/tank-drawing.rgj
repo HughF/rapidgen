@@ -13,10 +13,15 @@ part_height = 1000
 axis        = 1450 0 300
 rpm         = 30
 
-fan_width   = 100
-overlap     = 50
-standoff    = 250
+pattern     = spot
+spot_diameter = 12
+step_over   = 6
+standoff    = 150
 coats       = 2
+cycles      = 8
+dwell       = 20
+thickness_per_pass = 25
+target_thickness   = 350
 
 tool        = tSprayGun
 tool_define = yes

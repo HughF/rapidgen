@@ -76,20 +76,49 @@ approach distance between strokes. More than one stroke needs `gun_signal`,
 because the gun has to be off in between; sharp corners are counted and
 reported, since the robot slows through each one and the coat builds up.
 
-The fan is a wide slot, and the gun does not turn during a program: `fan_along`
-says which way the fan's long axis lies in the drawing, and **a stroke has to
-run across the fan** to lay down a band its full width. A stroke running along
-the fan paints a narrow line instead, which the canvas shows as a thin band and
-the report warns about, with how much of the painted length is affected. Fill
-passes should therefore run across `fan_along` — the defaults (fan at 90°,
-passes at 0°) already do.
+Each open stroke is **run on and off**: extended past both ends by `lead` —
+by default far enough to reach spray speed and stop again, worked out from the
+speed and the acceleration — so the gun is never changing speed over the work.
+A dip in speed is a ridge in the coating. Corners are rounded and the only
+dead stops are clear of the part.
+
+With `pattern = fan` (paint) the fan is a wide slot that does not turn with the
+path, so `fan_along` says which way it lies and **a stroke has to run across
+it** to lay down a band its full width; the canvas draws such a stroke as a
+thin line and the report says how much of the length is affected. With
+`pattern = spot` — thermal spray, the default — none of that applies: a round
+spot is the same width whichever way the stroke runs.
 
 **Cylinder.** The part turns continuously, so the robot cannot know its angle
-and only full bands round it can be sprayed. Each turn advances the spray by
-the pitch: `fan width × (1 − overlap)`, and the traverse speed follows,
-`pitch × rpm / 60`. The gun turns round `fan/2 + run-up` past each band edge
-so the edge gets its full number of passes. A DXF region that does not wrap
-the full circumference, or a hole in one, is refused rather than coated wrong.
+and only full bands round it can be sprayed. Each turn advances the gun by the
+`step_over`, and the traverse speed follows: `step_over × rpm / 60`. The report
+also gives the **surface speed** the part passes the gun at, and warns outside
+the 0.2–3 m/s thermal spraying usually runs at. The gun turns round
+`width/2 + run-up` past each band edge so the edge gets its full number of
+passes. A DXF region that does not wrap the full circumference, or a hole in
+one, is refused rather than coated wrong.
+
+## Building a coating
+
+Thermal spray builds thickness up over many passes, so the process settings
+are about repetition, not a single coat:
+
+- `spot_diameter` and `step_over` set how much each point is covered: the
+  passes per point is simply the width over the step-over.
+- `cycles` repeats the whole pattern, `dwell` waits between cycles to let the
+  part cool, and `cool_signal` is held on through the dwell. The program
+  repeats the pattern in a `FOR` loop rather than writing the targets out
+  again, so dozens of cycles still fit an S4's memory.
+- `thickness_per_pass` — **your** measured microns for one pass — with
+  `target_thickness` gives an estimated thickness per cycle and in total, and
+  how many cycles would reach the target. That is arithmetic on your figure,
+  not a model of the process; nothing is refused on the strength of it.
+- `gun = continuous` says the torch cannot be switched stroke by stroke. The
+  checks then measure the travel between strokes that passes over the part,
+  and every descent and lift over it, and warn — that is where unwanted
+  coating lands. `gun = switched` with a `gun_signal` behaves as a paint gun.
+- **Part temperature is not modelled.** The dwell exists to control it; how
+  hot the part actually gets is yours to judge.
 
 ## Job files
 

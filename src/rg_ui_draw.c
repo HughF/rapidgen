@@ -107,7 +107,12 @@ static bool painting(const RgUi *ui)
 
 static double fill_pitch(const RgUi *ui)
 {
-    return ui->job.fan_width * (1.0 - ui->job.overlap / 100.0);
+    return rg_job_step(&ui->job);
+}
+
+static double spray_width(const RgUi *ui)
+{
+    return rg_job_width(&ui->job);
 }
 
 /* ------------------------------------------------------------------ */
@@ -222,29 +227,57 @@ static void dot(struct nk_command_buffer *cb, float x, float y, float r, struct 
 }
 
 /*
- * What the spray actually covers: the path swept by the fan, which is a slot
- * of the fan's width lying along `fan_along` and not turning. So each segment
- * covers a parallelogram — the segment offset by half the fan each way along
- * the fan's axis — and a segment running along the fan covers barely more
- * than a line, which is the point of drawing it this way.
+ * What the spray actually covers.
  *
- * Not one thick polyline: that would draw a strip always square to the path,
- * which is not what a gun with a fixed fan does, and Nuklear's mitred joins
- * throw out wedges far outside the sprayed area at every corner.
+ * A thermal-spray torch lays down a round spot, so the covered strip is the
+ * path swept by a disc: a rectangle square to each segment, with a disc in
+ * the corners, and it is the same width whichever way the stroke runs.
+ *
+ * A paint fan is a slot lying along `fan_along` that does not turn with the
+ * path, so each segment covers a parallelogram instead, and a stroke running
+ * along the fan covers barely more than a line — which is the point of
+ * drawing the two differently.
+ *
+ * Neither is one thick polyline: Nuklear mitres a thick line's joins and
+ * throws out wedges far outside the sprayed area at every corner.
  */
 static void band(RgUi *ui, struct nk_command_buffer *cb, const RgPt *p, int n, float w,
                  struct nk_color col)
 {
     if (w < 2.0f || n < 2)
         return;
+    bool spot = ui->job.pattern != RG_PAT_FAN;
     double a = ui->job.fan_along * RG_DEG;
     float hx = (float)cos(a) * w * 0.5f, hy = -(float)sin(a) * w * 0.5f;   /* screen Y is down */
+    float r = w * 0.5f;
+
     for (int k = 1; k < n; k++) {
         float ax = to_sx(ui, p[k - 1].x), ay = to_sy(ui, p[k - 1].y);
         float bx = to_sx(ui, p[k].x), by = to_sy(ui, p[k].y);
+        if (spot) {
+            float dx = bx - ax, dy = by - ay, len = (float)hypot(dx, dy);
+            if (len < 1e-3f)
+                continue;
+            hx = -dy / len * r;
+            hy = dx / len * r;
+        }
         float quad[8] = { ax + hx, ay + hy, bx + hx, by + hy,
                           bx - hx, by - hy, ax - hx, ay - hy };
         nk_fill_polygon(cb, quad, 4, col);
+    }
+    if (!spot)
+        return;
+    /* Round the corners, where the disc pivots — and the ends, which are
+     * where the spot sits when the gun arrives and leaves. */
+    for (int k = 0; k < n; k++) {
+        if (k > 0 && k + 1 < n) {
+            double ax = p[k].x - p[k - 1].x, ay = p[k].y - p[k - 1].y;
+            double bx = p[k + 1].x - p[k].x, by = p[k + 1].y - p[k].y;
+            double la = hypot(ax, ay), lb = hypot(bx, by);
+            if (la < 1e-9 || lb < 1e-9 || (ax * bx + ay * by) / (la * lb) > 0.985)
+                continue;
+        }
+        dot(cb, to_sx(ui, p[k].x), to_sy(ui, p[k].y), r, col);
     }
 }
 
@@ -311,7 +344,7 @@ static void draw_stroke(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *
 {
     const RgTheme *t = ui->theme;
     struct nk_color line = selected ? t->warn : t->trace_a;
-    float fan = (float)(ui->job.fan_width * ui->zoom);
+    float fan = (float)(spray_width(ui) * ui->zoom);
     if (isfinite(fan) && fan > S(ui, 3))
         band(ui, cb, st->pts, st->n, fan, alpha(line, selected ? 70 : 42));
     polyline(ui, cb, st->pts, st->n, false, S(ui, selected || hovered ? 2.6f : 1.8f), line);
@@ -403,7 +436,7 @@ static void fill_loop(RgUi *ui, int loop)
         ui_message(ui, true, "Set the fan width and overlap first: they space the passes.");
         return;
     }
-    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * ui->job.fan_width : 0.0 };
+    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * spray_width(ui) : 0.0 };
     RgStroke *st;
     int n = rg_pattern_fill(&ui->shape, loop, &o, &st);
     if (n <= 0) {
@@ -422,7 +455,7 @@ static void fill_loop(RgUi *ui, int loop)
 static void update_fill_preview(RgUi *ui)
 {
     double pitch = fill_pitch(ui);
-    double key[4] = { pitch, ui->fill_angle, ui->fill_extend ? ui->job.fan_width : 0.0,
+    double key[4] = { pitch, ui->fill_angle, ui->fill_extend ? spray_width(ui) : 0.0,
                       ui->shown_scale };
     bool want = ui->tool == TOOL_FILL && ui->hover_loop >= 0 && pitch > 0.5 && painting(ui);
     if (!want) {
@@ -432,7 +465,7 @@ static void update_fill_preview(RgUi *ui)
     if (ui->preview_loop == ui->hover_loop && memcmp(key, ui->preview_key, sizeof key) == 0)
         return;
     clear_preview(ui);
-    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * ui->job.fan_width : 0.0 };
+    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * spray_width(ui) : 0.0 };
     int n = rg_pattern_fill(&ui->shape, ui->hover_loop, &o, &ui->preview);
     ui->npreview = n > 0 ? n : 0;
     ui->preview_loop = ui->hover_loop;
@@ -820,9 +853,9 @@ static void inspect_tool(RgUi *ui)
                 "puts the edge of the spray on the outline; 0 runs on the line; negative runs "
                 "outside it", &ui->inset, -1000, 1000, 1, "mm");
         button_row(ui, 2);
-        if (button(ui, "Half the fan", "Inset by half the fan width: the spray's edge "
-                   "follows the outline", !isnan(ui->job.fan_width)))
-            ui->inset = 0.5 * ui->job.fan_width;
+        if (button(ui, "Half the width", "Inset by half what the gun covers, so the edge of "
+                   "the spray follows the outline", !isnan(spray_width(ui))))
+            ui->inset = 0.5 * spray_width(ui);
         if (button(ui, "On the line", "Run the gun on the outline itself", true))
             ui->inset = 0.0;
         ui_label_wrap(ui, "Click near an outline: the stroke starts at the nearest point and "
@@ -835,11 +868,12 @@ static void inspect_tool(RgUi *ui)
                 &ui->fill_angle, -180, 180, 5, "deg");
         double p = fill_pitch(ui);
         if (p > 0.0)
-            ui_info_rowf(ui, "Spacing", "%.1f mm (fan less %.0f %%)", p, ui->job.overlap);
+            ui_info_rowf(ui, "Spacing", "%.1f mm step-over, %.1f passes per point", p,
+                         spray_width(ui) / p);
         else
-            ui_info_row(ui, "Spacing", "set the fan width and overlap");
-        ui_check(ui, "Run past the edge", "Carry each pass half a fan width past the outline "
-                 "so the edge gets a full coat. Passes stop at the edge of a hole, so "
+            ui_info_row(ui, "Spacing", "set the spot and step-over");
+        ui_check(ui, "Run past the edge", "Carry each pass half the gun's width past the "
+                 "outline so the edge gets a full coat. Passes stop at the edge of a hole, so "
                  "nothing inside it is sprayed", &ui->fill_extend);
         ui_label_wrap(ui, "Hover inside an outline to preview, click to fill it. Outlines "
                       "inside it are left bare.", t->text_dim);
@@ -979,19 +1013,31 @@ static void inspect_spray(RgUi *ui)
     RgJob *j = &ui->job;
     ui_gap(ui, 4);
     ui_section(ui, "Spray");
-    prop_set(ui, "Fan width", "The spray pattern's width at the standoff: the translucent "
-             "band drawn along each stroke", &j->fan_width, 80, 5, 1000, 1, "mm");
+    if (j->pattern == RG_PAT_FAN) {
+        prop_set(ui, "Fan width", "The fan's width at the standoff: the band drawn along each "
+                 "stroke", &j->fan_width, 80, 5, 1000, 1, "mm");
+        if (j->part == RG_PART_FLAT)
+            ui_prop(ui, "Fan angle", "Which way the fan's long axis lies in the drawing. A "
+                    "stroke must run across the fan to lay down a band its full width; one "
+                    "running along it paints a narrow line, as the band on the canvas shows",
+                    &j->fan_along, -180, 180, 5, "deg");
+    } else {
+        prop_set(ui, "Spot", "The circle the gun coats at the standoff. A round spot does not "
+                 "care which way the gun is turned, so a stroke may run any direction",
+                 &j->spot_diameter, 12, 0.5, 200, 0.5, "mm");
+    }
+    double step = rg_job_step(j);
+    if (!isnan(step) && ui_prop(ui, "Step-over", "The advance between one pass and the next. "
+                                "Each point is covered spot / step-over times", &step, 0.1,
+                                1000, 0.5, "mm"))
+        j->step_over = step;
     if (j->part == RG_PART_FLAT)
-        ui_prop(ui, "Fan angle", "Which way the fan's long axis lies in the drawing. A stroke "
-                "must run across the fan to lay down a band its full width; one running along "
-                "it paints a narrow line, as the band on the canvas shows",
-                &j->fan_along, -180, 180, 5, "deg");
-    prop_set(ui, "Overlap", "How much of the fan each fill pass covers again", &j->overlap, 50,
-             0, 90, 1, "%");
-    if (j->part == RG_PART_FLAT)
-        prop_set(ui, "Speed", "The gun's speed along a stroke", &j->spray_speed, 300, 1, 2000,
-                 5, "mm/s");
-    prop_set(ui, "Standoff", "Gun tip to the part's surface", &j->standoff, 200, 10, 1000, 5, "mm");
+        prop_set(ui, "Speed", "The gun's speed along a stroke. It must be held steady: a dip "
+                 "in speed is a ridge in the coating", &j->spray_speed, 500, 1, 2000, 10, "mm/s");
+    prop_set(ui, "Standoff", "Gun tip to the part's surface", &j->standoff, 150, 10, 1000, 5, "mm");
+    ui_prop_int(ui, "Cycles", "Repeats of the whole pattern. A coating is built up over many "
+                "of them", &j->cycles, 1, 999, "");
+    ui_prop(ui, "Dwell", "Seconds between cycles, to let the part cool", &j->dwell, 0, 600, 1, "s");
 }
 
 /* ------------------------------------------------------------------ */

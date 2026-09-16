@@ -28,9 +28,14 @@ static bool program_for(const char *extra, RgBuf *out, RgJob *jout)
     CHECK(rg_job_parse(&j, text, err, sizeof err) && rg_job_validate(&j, err, sizeof err));
     RgPlan pl;
     bool ok = rg_plan_build(&j, NULL, &pl);
-    CHECK(ok);
+    if (!ok) {
+        printf("  plan refused: %s\n", pl.nissues ? pl.issues[0].text : "(no reason)");
+        CHECK(ok);
+    }
     rg_buf_init(out);
     ok = ok && rg_rapid_write(&j, &pl, "test.rgj", "2026-09-15 12:00", out, err, sizeof err);
+    if (!ok)
+        printf("  no program written: %s\n", err);
     rg_plan_free(&pl);
     if (jout)
         *jout = j;
@@ -40,6 +45,8 @@ static bool program_for(const char *extra, RgBuf *out, RgJob *jout)
 static int count(const char *hay, const char *needle)
 {
     int n = 0;
+    if (!hay)
+        return 0;
     for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle))
         n++;
     return n;

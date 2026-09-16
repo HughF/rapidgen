@@ -78,9 +78,23 @@ struct RgPlan {
     double overrun;             /* cylinder: gun centre past each edge     */
     double reach_past_edge;     /* cylinder: furthest spray lands past an edge */
     double spray_time;          /* seconds spraying                        */
-    double stroke_length;       /* flat: total painted length              */
-    double along_fan_length;    /* flat: painted along the fan, not across */
+    double stroke_length;       /* flat: total sprayed length, one cycle   */
+    double along_fan_length;    /* fan only: sprayed along the fan         */
     int    sharp_corners;       /* flat: turns of more than 45 degrees     */
+
+    /* Building a coating takes many passes over many cycles. */
+    int    cycles;
+    double dwell;               /* seconds between cycles                  */
+    double cycle_time;          /* seconds spraying, one cycle             */
+    double lead_used;           /* flat: run-on and run-off at each end    */
+    double lead_needed;         /* ...the least the speed allows           */
+    double passes_per_point;    /* the gun's width over the step-over      */
+    double thickness_cycle;     /* microns a cycle lays down, if given     */
+    double thickness_total;     /* ...over every cycle                     */
+    int    cycles_for_target;   /* to reach target_thickness               */
+    double surface_speed;       /* cylinder: the part's surface under the gun, mm/s */
+    double transit_over_part;   /* continuous gun: travel coated in passing */
+    int    transit_drops;       /* ...and descents or lifts over the part  */
 
     RgBand bands[RG_MAX_BANDS];
     int    nbands;

@@ -5,6 +5,42 @@ a second release on the same day.
 
 ## [Unreleased]
 
+### Changed
+
+- **Built for thermal spray, not paint.** The process is a torch laying down a
+  round spot, built up over many cycles, not a paint fan in one or two coats.
+  - `pattern = spot | fan`, spot by default. A round spot is the same width
+    whichever way the stroke runs, so the gun's rotation about its own axis no
+    longer constrains anything — `fan_along` and the "this stroke runs along
+    the fan" warning apply only to `pattern = fan`. The canvas draws the strip
+    a disc sweeps for a spot, and the slot a fan sweeps for a fan.
+  - `spot_diameter` and `step_over` (the advance between passes) replace fan
+    width and overlap as the working numbers; `overlap` still sets the
+    step-over when it is not given. The report says how many passes each point
+    gets: the width over the step-over.
+  - `cycles` repeats the whole pattern, with `dwell` seconds between them and
+    an optional `cool_signal` held on through the dwell. The program repeats
+    the pattern in a `FOR` loop rather than writing its targets out again, so
+    a coating of dozens of cycles still fits an S4's memory.
+  - `thickness_per_pass` (your own measured microns) and `target_thickness`
+    give an estimated thickness per cycle and in total, and how many cycles
+    would reach the target. It is arithmetic on your figure, not a model of
+    the process, and nothing is refused on the strength of it.
+  - `gun = continuous | switched`. A torch cannot be switched stroke by
+    stroke, so "more than one stroke needs a gun signal" is gone; instead,
+    travel between strokes that passes over the part, and every descent and
+    lift over it, is measured and warned about, because that is where unwanted
+    coating lands.
+  - **Run-on and run-off.** Each open stroke is extended past both ends by
+    `lead` — by default far enough to reach spray speed and stop again, from
+    the speed and the acceleration — and the gun no longer comes to a dead
+    stop on the work: a dip in speed is a ridge in the coating. Corners are
+    rounded throughout; the only stops are clear of the part.
+  - The cylinder's report gives the **surface speed** the part passes the gun
+    at, and warns outside the 0.2–3 m/s thermal spraying usually runs at.
+  - Part temperature is stated as not modelled, next to the dwell that exists
+    to control it.
+
 ## [2026.09.16.1] — alpha, DXF import fix
 
 ### Fixed

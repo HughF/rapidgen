@@ -243,6 +243,7 @@ static void build_cylinder(Ctx *c)
 {
     const RgJob *j = c->job;
     RgPlan *pl = c->pl;
+    bool switched = j->gun == RG_GUN_SWITCHED && j->gun_signal[0];
 
     add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
     for (int b = 0; b < pl->nbands && !c->oom; b++) {
@@ -261,7 +262,7 @@ static void build_cylinder(Ctx *c)
             return;
         if (b == 0 && j->ready_prompt)
             in->after = RG_ACT_READY;
-        else if (j->gun_signal[0])
+        else if (switched)
             in->after = RG_ACT_GUN_ON;
 
         double z = z_start;
@@ -272,7 +273,7 @@ static void build_cylinder(Ctx *c)
             if (!last)
                 return;
         }
-        if (j->gun_signal[0])
+        if (switched)
             last->after = RG_ACT_GUN_OFF;
         add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_cylinder(j, z, j->approach),
                  b, NULL);
@@ -280,43 +281,71 @@ static void build_cylinder(Ctx *c)
     add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
 }
 
+/* A point `d` beyond `end`, carrying on the way the stroke was going. */
+static RgPt extend_from(RgPt prev, RgPt end, double d)
+{
+    double dx = end.x - prev.x, dy = end.y - prev.y, len = hypot(dx, dy);
+    if (len < 1e-9 || d <= 0.0)
+        return end;
+    RgPt p = { end.x + dx / len * d, end.y + dy / len * d };
+    return p;
+}
+
 static void build_flat(Ctx *c)
 {
     const RgJob *j = c->job;
+    RgPlan *pl = c->pl;
+    bool switched = j->gun == RG_GUN_SWITCHED && j->gun_signal[0];
+    double lead = pl->lead_used;
 
     add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
     for (int s = 0; s < j->nstrokes && !c->oom; s++) {
         const RgStroke *st = &j->strokes[s];
-        char note[80];
+        bool closed = st->n > 2 && hypot(st->pts[st->n - 1].x - st->pts[0].x,
+                                         st->pts[st->n - 1].y - st->pts[0].y) < 1e-6;
+        double use_lead = closed ? 0.0 : lead;
+        RgPt first = extend_from(st->pts[1], st->pts[0], use_lead);
+        RgPt last_pt = extend_from(st->pts[st->n - 2], st->pts[st->n - 1], use_lead);
+
+        char note[96];
         double len = 0.0;
         for (int k = 1; k < st->n; k++)
             len += hypot(st->pts[k].x - st->pts[k - 1].x, st->pts[k].y - st->pts[k - 1].y);
-        snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm", s + 1, st->n, len);
+        snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm%s", s + 1, st->n, len,
+                 use_lead > 0.0 ? ", run on and off" : closed ? ", closed" : "");
 
-        add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_flat(j, st->pts[0], j->approach),
+        add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_flat(j, first, j->approach),
                  s, note);
-        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_FINE,
-                              gun_flat(j, st->pts[0], 0), s, NULL);
+        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_FINE, gun_flat(j, first, 0),
+                              s, NULL);
         if (!in)
             return;
         if (s == 0 && j->ready_prompt)
             in->after = RG_ACT_READY;
-        else if (j->gun_signal[0])
+        else if (switched)
             in->after = RG_ACT_GUN_ON;
 
+        /* The run-on, then the stroke, then the run-off: rounded corners
+         * throughout so the gun never stops over the work. */
         RgMove *last = in;
-        RgPt at = st->pts[0];
-        for (int k = 1; k < st->n; k++) {
+        RgPt at = first;
+        for (int k = 0; k < st->n; k++) {
             if (hypot(st->pts[k].x - at.x, st->pts[k].y - at.y) < 1e-6)
                 continue;
             at = st->pts[k];
-            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, k == st->n - 1 ? RG_Z_FINE : RG_Z_SMALL,
-                            gun_flat(j, at, 0), s, NULL);
+            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_SMALL, gun_flat(j, at, 0), s, NULL);
             if (!last)
                 return;
         }
-        last->zone = RG_Z_FINE;
-        if (j->gun_signal[0])
+        if (use_lead > 0.0 && hypot(last_pt.x - at.x, last_pt.y - at.y) > 1e-6) {
+            at = last_pt;
+            last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_SMALL, gun_flat(j, at, 0), s, NULL);
+            if (!last)
+                return;
+        }
+        /* Stop only once the gun is clear of the work. */
+        last->zone = use_lead > 0.0 ? RG_Z_TRAVEL : RG_Z_FINE;
+        if (switched)
             last->after = RG_ACT_GUN_OFF;
         add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_flat(j, at, j->approach),
                  s, NULL);
@@ -557,7 +586,12 @@ static void check_cylinder(Ctx *c)
         if (b + 1 < pl->nbands) {
             double gap = pl->bands[b + 1].y0 - bd->y1;
             double needed = 2.0 * pl->reach_past_edge;
-            if (!j->gun_signal[0])
+            if (j->gun == RG_GUN_CONTINUOUS)
+                issue(c, RG_WARN, "bands %d and %d are %.1f mm apart and the gun runs "
+                      "continuously, so the part is coated between them as the gun travels: "
+                      "set gun = switched with a gun_signal, or treat it as one band",
+                      b + 1, b + 2, gap);
+            else if (!j->gun_signal[0])
                 issue(c, RG_REFUSE, "bands %d and %d are %.1f mm apart, and without "
                       "gun_signal the gun cannot be switched off between them: set "
                       "gun_signal, or make one program per band", b + 1, b + 2, gap);
@@ -585,10 +619,15 @@ static void check_cylinder(Ctx *c)
         }
     }
 
-    if (!j->gun_signal[0])
-        issue(c, RG_WARN, "the gun is controlled outside the program: it must only spray "
-              "while the robot traverses. Spraying while the arm waits at the start of a "
-              "band puts a thick ring on the part at that height");
+    if (pl->surface_speed > 0.0 && (pl->surface_speed < 200.0 || pl->surface_speed > 3000.0))
+        issue(c, RG_WARN, "the part's surface passes the gun at %.2f m/s, outside the 0.2 to "
+              "3 m/s thermal spraying usually runs at: change the rotator's speed, or the "
+              "coating will build unevenly", pl->surface_speed / 1000.0);
+
+    if (j->gun == RG_GUN_CONTINUOUS)
+        issue(c, RG_WARN, "the gun runs continuously: it coats the part from the moment it "
+              "reaches the start of a band until it leaves the last one, the run-up and the "
+              "approach included");
 
     double h = hypot(j->axis.x, j->axis.y);
     if (h < j->radius + j->standoff + j->clearance)
@@ -607,14 +646,11 @@ static void check_flat(Ctx *c)
     if (pl->spray_speed > j->max_spray_speed)
         issue(c, RG_REFUSE, "spray_speed %.0f mm/s is above max_spray_speed %.0f mm/s",
               pl->spray_speed, j->max_spray_speed);
-    if (j->nstrokes > 1 && !j->gun_signal[0])
-        issue(c, RG_REFUSE, "there are %d strokes, and without gun_signal the gun cannot be "
-              "switched off between them: set gun_signal, or join them into one stroke",
-              j->nstrokes);
-    if (j->nstrokes == 1 && !j->gun_signal[0])
-        issue(c, RG_WARN, "the gun is controlled outside the program: it must only spray "
-              "while the robot moves along the stroke. Spraying while the arm waits at the "
-              "start leaves a heavy spot there");
+    if (!isnan(j->lead) && j->lead + 1e-9 < pl->lead_needed)
+        issue(c, RG_WARN, "lead %.1f mm is shorter than the %.1f mm the gun needs to reach "
+              "%.0f mm/s and stop again (%.0f mm/s\xc2\xb2): it will still be changing speed "
+              "over the work, which shows as a ridge in the coating",
+              j->lead, pl->lead_needed, pl->spray_speed, j->accel);
 
     double x0 = DBL_MAX, y0 = DBL_MAX, x1 = -DBL_MAX, y1 = -DBL_MAX;
     double fan_a = j->fan_along * RG_DEG, fx = cos(fan_a), fy = sin(fan_a);
@@ -653,8 +689,8 @@ static void check_flat(Ctx *c)
               "the robot slows through each corner, so the coat is heavier there",
               SHARP_CORNER_DEG, pl->sharp_corners, pl->sharp_corners == 1 ? "" : "s");
 
-    pl->along_fan_length = along_fan;
-    if (along_fan > 10.0 && along_fan > 0.02 * pl->stroke_length)
+    pl->along_fan_length = j->pattern == RG_PAT_FAN ? along_fan : 0.0;
+    if (j->pattern == RG_PAT_FAN && along_fan > 10.0 && along_fan > 0.02 * pl->stroke_length)
         issue(c, RG_WARN, "%.0f mm of the %.0f mm painted (%.0f %%) runs within 30 deg of the "
               "fan's long axis, which lies at %.0f deg: there the gun lays a narrow line, not "
               "a band %.0f mm wide. Turn the fan (fan_along), or paint those parts across it",
@@ -663,11 +699,49 @@ static void check_flat(Ctx *c)
 
     /* The part is taken to be under the pattern and its spray, plus the
      * clearance; the arm is kept above the surface anywhere over it. */
-    double margin = 0.5 * j->fan_width + j->clearance;
+    double margin = 0.5 * rg_job_width(j) + j->clearance;
     c->fx0 = x0 - margin;
     c->fy0 = y0 - margin;
     c->fx1 = x1 + margin;
     c->fy1 = y1 + margin;
+
+    /*
+     * A torch that cannot be switched coats whatever passes under it. The
+     * strokes' own footprint stands in for the part: travel across it between
+     * strokes, and the descents and lifts over it, land coating where none
+     * was asked for.
+     */
+    if (j->gun == RG_GUN_CONTINUOUS && j->nstrokes) {
+        double px0 = x0 - 0.5 * rg_job_width(j), px1 = x1 + 0.5 * rg_job_width(j);
+        double py0 = y0 - 0.5 * rg_job_width(j), py1 = y1 + 0.5 * rg_job_width(j);
+        for (int s = 0; s < j->nstrokes; s++) {
+            RgPt a = j->strokes[s].pts[0];
+            RgPt z = j->strokes[s].pts[j->strokes[s].n - 1];
+            if (a.x >= px0 && a.x <= px1 && a.y >= py0 && a.y <= py1)
+                pl->transit_drops++;
+            if (z.x >= px0 && z.x <= px1 && z.y >= py0 && z.y <= py1)
+                pl->transit_drops++;
+            if (s + 1 < j->nstrokes) {
+                RgPt b = j->strokes[s + 1].pts[0];
+                /* however much of the hop between strokes passes over the part */
+                double n = 32.0, inside = 0.0;
+                double seg = hypot(b.x - z.x, b.y - z.y) / n;
+                for (int t = 0; t < (int)n; t++) {
+                    double u = (t + 0.5) / n;
+                    double mx = z.x + (b.x - z.x) * u, my = z.y + (b.y - z.y) * u;
+                    if (mx >= px0 && mx <= px1 && my >= py0 && my <= py1)
+                        inside += seg;
+                }
+                pl->transit_over_part += inside;
+            }
+        }
+        if (pl->transit_over_part > 1.0 || pl->transit_drops)
+            issue(c, RG_WARN, "the gun runs continuously: %.0f mm of travel between strokes "
+                  "passes over the part, and it drops onto or lifts off the part %d time%s, "
+                  "coating it there. Order the strokes so the gun leaves the work before it "
+                  "moves, or set gun = switched with a gun_signal",
+                  pl->transit_over_part, pl->transit_drops, pl->transit_drops == 1 ? "" : "s");
+    }
 }
 
 static void check_limits(Ctx *c)
@@ -723,15 +797,25 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     c.tool = rg_job_tool(job);
     c.tool_inv = rg_pose_inverse(c.tool);
 
-    pl->pitch = job->fan_width * (1.0 - job->overlap / 100.0);
+    double width = rg_job_width(job);
+    pl->pitch = rg_job_step(job);
+    pl->cycles = job->cycles;
+    pl->dwell = job->dwell;
+    pl->passes_per_point = pl->pitch > 0.0 ? width / pl->pitch : 0.0;
     if (c.flat) {
         pl->spray_speed = job->spray_speed;
+        /* Run on and off past each end far enough that the gun is up to speed
+         * before it reaches the work, and has left it before it slows: a dip
+         * in speed is a ridge in the coating. */
+        pl->lead_needed = pl->spray_speed * pl->spray_speed / (2.0 * job->accel) + 0.5 * width;
+        pl->lead_used = isnan(job->lead) ? pl->lead_needed : job->lead;
     } else {
         pl->circumference = 2.0 * RG_PI * job->radius;
         pl->spray_speed = pl->pitch * job->rpm / 60.0;
+        pl->surface_speed = pl->circumference * job->rpm / 60.0;
         pl->runup = pl->spray_speed * pl->spray_speed / (2.0 * job->accel);
-        pl->overrun = 0.5 * job->fan_width + pl->runup;
-        pl->reach_past_edge = pl->overrun + 0.5 * job->fan_width;
+        pl->overrun = 0.5 * width + pl->runup;
+        pl->reach_past_edge = pl->overrun + 0.5 * width;
 
         if (shape) {
             bands_from_shape(&c, shape);
@@ -771,8 +855,24 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
 
     for (int i = 1; i < pl->nmoves; i++)
         if (pl->moves[i].speed == RG_SPD_SPRAY)
-            pl->spray_time += rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
+            pl->cycle_time += rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
                                                   pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
+    pl->spray_time = pl->cycle_time * pl->cycles;
+
+    /* Thickness from the operator's own measured figure, not a model of the
+     * process: what one pass lays down, times the passes each point gets. */
+    if (!isnan(job->thickness_per_pass)) {
+        pl->thickness_cycle = job->thickness_per_pass * pl->passes_per_point;
+        pl->thickness_total = pl->thickness_cycle * pl->cycles;
+        if (!isnan(job->target_thickness) && pl->thickness_cycle > 0.0) {
+            pl->cycles_for_target = (int)ceil(job->target_thickness / pl->thickness_cycle - 1e-9);
+            if (pl->cycles_for_target > pl->cycles)
+                issue(&c, RG_WARN, "%d cycle%s lay down about %.0f um, short of the %.0f um "
+                      "wanted: %d cycles would reach it, at %.0f um a cycle",
+                      pl->cycles, pl->cycles == 1 ? "" : "s", pl->thickness_total,
+                      job->target_thickness, pl->cycles_for_target, pl->thickness_cycle);
+        }
+    }
     if (c.oom)
         issue(&c, RG_REFUSE, "out of memory");
     return !pl->refused;
