@@ -17,7 +17,7 @@ Either way, rapidgen works out the motion, follows every move through the
 robot's kinematics, and then writes the program or refuses it with the reason
 and how far off it was.
 
-![The editor's Draw page: a flat panel's drawing with the pattern painted over it, each stroke drawn as the band the spray fan covers](docs/screenshots/draw-page.png)
+![The editor's Draw page: a flat panel's drawing with the pattern painted over it, each stroke drawn as the band the spray covers](docs/screenshots/draw-page.png)
 
 > **Status.** Tested against its own unit tests (ASan + UBSan), and the editor
 > has been driven and screenshotted under a virtual display. The Windows build
@@ -32,9 +32,9 @@ and how far off it was.
 `rapidgen` with no arguments opens the last job. Three pages:
 
 **Draw** — the part's drawing with the pattern over it. Each stroke is drawn
-as a translucent band as wide as the spray fan, which is what will actually be
-coated, with its number at the start and arrows along it: the order and the
-direction are the program. Tools:
+as the band the spray actually covers — the strip a round spot sweeps, or the
+slot of a fan — with its number at the start and arrows along it: the order and
+the direction are the program. Tools:
 
 | Tool | Key | What it does |
 |---|---|---|
@@ -42,7 +42,7 @@ direction are the program. Tools:
 | Line | L | Click points; they snap to the drawing's corners and lines (Shift to place one freely). Double-click or Enter finishes, Backspace takes one back, Escape cancels |
 | Draw | D | Freehand; thinned to the points that matter when you let go |
 | Trace | T | Click near an outline: once round it from that point, inset by the amount set |
-| Fill | F | Click inside an outline: parallel passes a fan width less the overlap apart, previewed as you hover |
+| Fill | F | Click inside an outline: parallel passes a step-over apart, previewed as you hover |
 | Scale | M | Click two points a known distance apart, then type the true distance |
 
 Delete removes the selected stroke, R reverses it, and the stroke list
@@ -138,8 +138,9 @@ Coordinates:
 | flat part (`wRgPart`) | the drawing's origin on the surface | the drawing's X and Y, Z out of the surface |
 | drawing | as drawn, × `drawing_scale` | millimetres |
 
-The tool's Z axis is the spray direction and its X axis the long axis of the
-fan. `tool_tcp` is the gun tip; rapidgen adds the standoff itself.
+The tool's Z axis is the spray direction and its X axis the long axis of a
+fan, which a round spot does not use. `tool_tcp` is the gun tip; rapidgen adds
+the standoff itself.
 
 ## Drawings
 

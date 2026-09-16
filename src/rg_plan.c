@@ -614,8 +614,8 @@ static void check_cylinder(Ctx *c)
             const RgBand *bd = &pl->bands[b];
             if (bd->y0 > 1e-6 || bd->y1 < j->part_height - 1e-6)
                 issue(c, RG_NOTE, "band %d: the part is coated up to %.1f mm beyond the "
-                      "band's edges (half the fan, the overrun and the run-up)", b + 1,
-                      pl->reach_past_edge);
+                      "band's edges (half the %s, the overrun and the run-up)", b + 1,
+                      pl->reach_past_edge, j->pattern == RG_PAT_SPOT ? "spot" : "fan");
         }
     }
 

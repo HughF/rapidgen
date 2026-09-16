@@ -433,7 +433,7 @@ static void fill_loop(RgUi *ui, int loop)
 {
     double pitch = fill_pitch(ui);
     if (!(pitch > 0.5)) {
-        ui_message(ui, true, "Set the fan width and overlap first: they space the passes.");
+        ui_message(ui, true, "Set the spot and the step-over first: they space the passes.");
         return;
     }
     RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * spray_width(ui) : 0.0 };
@@ -849,7 +849,7 @@ static void inspect_tool(RgUi *ui)
         ui_label_wrap(ui, "Hold the button down and draw.", t->text_dim);
         break;
     case TOOL_TRACE:
-        ui_prop(ui, "Inset", "How far inside the outline the gun runs. Half the fan width "
+        ui_prop(ui, "Inset", "How far inside the outline the gun runs. Half the gun's width "
                 "puts the edge of the spray on the outline; 0 runs on the line; negative runs "
                 "outside it", &ui->inset, -1000, 1000, 1, "mm");
         button_row(ui, 2);
@@ -863,8 +863,11 @@ static void inspect_tool(RgUi *ui)
                       "check the preview.", t->text_dim);
         break;
     case TOOL_FILL: {
-        ui_prop(ui, "Angle", "The direction of the passes, from the drawing's X axis. The "
-                "passes should run across the fan, which lies at the Fan angle below",
+        ui_prop(ui, "Angle", ui->job.pattern == RG_PAT_FAN
+                ? "The direction of the passes, from the drawing's X axis. The passes should "
+                  "run across the fan, which lies at the Fan angle below"
+                : "The direction of the passes, from the drawing's X axis. A round spot is the "
+                  "same width whichever way they run",
                 &ui->fill_angle, -180, 180, 5, "deg");
         double p = fill_pitch(ui);
         if (p > 0.0)

@@ -154,5 +154,5 @@ void rg_report_write(const RgJob *j, const RgPlan *pl, const char *program_file,
         "  - that the program loads: the file format is not yet checked on an S4\n"
         "\nRun it in simulation first, then step through it in manual reduced speed.\n",
         j->part == RG_PART_FLAT ? "its fixture" : "the rotator",
-        j->part == RG_PART_FLAT ? "speed and spacing" : "pitch and coats");
+        "the speed, the step-over and the cycles");
 }
