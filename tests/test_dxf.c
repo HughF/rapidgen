@@ -25,6 +25,12 @@ static bool read_dxf(const char *text, const char *layer, RgDrawing *d)
 
 #define ENTITIES(body) "0\nSECTION\n2\nENTITIES\n" body "0\nENDSEC\n0\nEOF\n"
 
+static bool rg_dxf_read_str(const char *text, const RgDxfOptions *opt, RgDrawing *d)
+{
+    err[0] = '\0';
+    return rg_dxf_read(text, strlen(text), opt, d, err, sizeof err);
+}
+
 static void test_lwpolyline(void)
 {
     RgDrawing d;
@@ -131,6 +137,56 @@ static void test_refusals(void)
     CHECK(strstr(err, "XY plane") != NULL);
 }
 
+/* Some CAD programs write a broken entity as not-a-number rather than
+ * leaving it out. One of those must not cost the whole drawing. */
+static void test_not_a_number(void)
+{
+    static const char *const spellings[] = { "1.#QNAN", "-1.#IND", "1.#INF", "nan", "-inf" };
+    for (size_t i = 0; i < sizeof spellings / sizeof spellings[0]; i++) {
+        char text[1024];
+        snprintf(text, sizeof text, ENTITIES(
+            "0\nLINE\n8\nOUTLINE\n10\n0\n20\n0\n11\n100\n21\n0\n"
+            "0\nARC\n8\n0\n10\n%s\n20\n%s\n40\n100\n50\n%s\n51\n%s\n"), spellings[i],
+            spellings[i], spellings[i], spellings[i]);
+
+        RgDxfOptions strict = { 0.2, NULL, false };
+        RgDrawing d;
+        err[0] = '\0';
+        CHECK(!rg_dxf_read(text, strlen(text), &strict, &d, err, sizeof err));
+        CHECK(strstr(err, "ARC") != NULL);
+        CHECK(strstr(err, "not a number") != NULL);
+        CHECK(strstr(err, spellings[i]) != NULL);
+
+        RgDxfOptions lenient = { 0.2, NULL, true };
+        CHECK(rg_dxf_read(text, strlen(text), &lenient, &d, err, sizeof err));
+        CHECK(d.n == 1);                       /* the good LINE survives */
+        CHECK(d.degenerate == 1);
+        CHECK_STR(d.degenerate_kind, "ARC");
+        CHECK(d.unsupported == 0);
+        rg_drawing_free(&d);
+    }
+
+    /* A dead vertex condemns its polyline, not the drawing. */
+    RgDxfOptions lenient = { 0.2, NULL, true };
+    RgDrawing d;
+    CHECK(rg_dxf_read_str(ENTITIES(
+        "0\nLINE\n8\n0\n10\n0\n20\n0\n11\n10\n21\n0\n"
+        "0\nPOLYLINE\n8\n0\n66\n1\n70\n1\n"
+        "0\nVERTEX\n8\n0\n10\n0\n20\n0\n"
+        "0\nVERTEX\n8\n0\n10\n1.#QNAN\n20\n5\n"
+        "0\nSEQEND\n8\n0\n"), &lenient, &d));
+    CHECK(d.n == 1);
+    CHECK(d.degenerate == 1);
+    CHECK_STR(d.degenerate_kind, "POLYLINE");
+    rg_drawing_free(&d);
+
+    /* Something that is not a number and not a known spelling is still an
+     * error: that is a broken file, not a broken entity. */
+    RgDxfOptions any = { 0.2, NULL, true };
+    CHECK(!rg_dxf_read_str(ENTITIES("0\nLINE\n8\n0\n10\nabc\n"), &any, &d));
+    CHECK(strstr(err, "expected a number") != NULL);
+}
+
 static void test_layers(void)
 {
     const char *text = ENTITIES(
@@ -154,5 +210,6 @@ TEST_MAIN("test_dxf",
     test_mirrored_arc();
     test_units();
     test_refusals();
+    test_not_a_number();
     test_layers();
 )

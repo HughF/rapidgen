@@ -48,8 +48,10 @@ typedef struct {
     int     insunits;    /* $INSUNITS as read; -1 when absent */
     double  to_mm;       /* the scale that was applied        */
     int     skipped;     /* annotation entities passed over   */
-    int     unsupported; /* lenient: geometry that was left out */
+    int     unsupported; /* lenient: geometry of a kind that cannot be read */
     char    unsupported_kind[16];   /* ...and the first kind of it */
+    int     degenerate;  /* lenient: entities whose numbers are unusable */
+    char    degenerate_kind[16];    /* ...and the first kind of those   */
 } RgDrawing;
 
 typedef struct {

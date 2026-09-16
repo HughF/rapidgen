@@ -92,12 +92,16 @@ typedef struct {
     int    f70;
     Vtx   *v;            /* LWPOLYLINE vertices in order */
     int    nv, vcap;
+    bool   bad;          /* a value that is not a number: nothing here is usable */
+    char   bad_val[32];  /* ...as the drawing spelled it                        */
+    int    bad_line;
 } Ent;
 
 typedef struct {
     Reader            rd;
     const RgDxfOptions *opt;
     RgDrawing         *out;
+    Ent               *cur;      /* the entity being read, for marking it bad */
     char              *err;
     size_t             errcap;
 } Ctx;
@@ -113,14 +117,44 @@ static bool fail(Ctx *c, const char *fmt, ...)
     return false;
 }
 
+/*
+ * Not-a-number, as CAD writes it. The C library spells it "nan" and "inf",
+ * which strtod reads; programs built against the Microsoft C runtime write
+ * "1.#QNAN", "-1.#IND" and "1.#INF", which it does not. QCAD emits these for
+ * an entity whose geometry has gone bad — an arc with no centre, say.
+ */
+static bool non_finite(const char *s, double parsed, const char *end)
+{
+    if (end != s && !*end)
+        return !isfinite(parsed);
+    return strstr(s, "#QNAN") || strstr(s, "#IND") || strstr(s, "#INF") ||
+           strstr(s, "#SNAN") || strstr(s, "#NAN");
+}
+
+/*
+ * A value that is not a number condemns its entity, not the whole drawing:
+ * one dead arc among hundreds of good lines should not cost the operator the
+ * import. The entity is marked and left out; read_entities decides whether
+ * that is merely counted (the editor) or refused (generating a program).
+ */
 static bool number(Ctx *c, double *out)
 {
     char *endp;
     double v = strtod(c->rd.val, &endp);
-    if (endp == c->rd.val || *endp || !isfinite(v))
-        return fail(c, "line %d: expected a number, found \"%s\"", c->rd.line, c->rd.val);
-    *out = v;
-    return true;
+    if (endp != c->rd.val && !*endp && isfinite(v)) {
+        *out = v;
+        return true;
+    }
+    if (c->cur && non_finite(c->rd.val, v, endp)) {
+        if (!c->cur->bad) {
+            c->cur->bad = true;
+            c->cur->bad_line = c->rd.line;
+            rg_copy(c->cur->bad_val, sizeof c->cur->bad_val, c->rd.val);
+        }
+        *out = 0.0;
+        return true;
+    }
+    return fail(c, "line %d: expected a number, found \"%s\"", c->rd.line, c->rd.val);
 }
 
 static bool push_vertex(Ctx *c, Ent *e, double x)
@@ -154,15 +188,21 @@ static bool read_entity(Ctx *c, Ent *e)
     rg_copy(e->type, sizeof e->type, c->rd.val);
     rg_copy(e->layer, sizeof e->layer, "0");
     bool lw = strcmp(e->type, "LWPOLYLINE") == 0;
+    c->cur = e;
 
     for (;;) {
         int k = next_pair(&c->rd);
-        if (k == 0)
+        if (k == 0) {
+            c->cur = NULL;
             return fail(c, "the drawing ends in the middle of a %s", e->type);
-        if (k < 0)
+        }
+        if (k < 0) {
+            c->cur = NULL;
             return fail(c, "line %d: malformed group code", c->rd.line);
+        }
         if (c->rd.code == 0) {
             c->rd.held = true;
+            c->cur = NULL;
             return true;
         }
         double v = 0.0;
@@ -357,7 +397,8 @@ static bool do_polyline(Ctx *c, Ent *head)
 
     Vtx *v = NULL;
     int nv = 0, vcap = 0;
-    Ent ve = { 0 };
+    Ent ve;
+    memset(&ve, 0, sizeof ve);
     bool ok = true;
 
     for (;;) {
@@ -375,6 +416,11 @@ static bool do_polyline(Ctx *c, Ent *head)
         if (!read_entity(c, &ve)) {
             ok = false;
             break;
+        }
+        if (ve.bad && !hdr.bad) {   /* one dead vertex spoils the polyline */
+            hdr.bad = true;
+            hdr.bad_line = ve.bad_line;
+            rg_copy(hdr.bad_val, sizeof hdr.bad_val, ve.bad_val);
         }
         if (seqend)
             break;
@@ -396,7 +442,11 @@ static bool do_polyline(Ctx *c, Ent *head)
     }
     free(ve.v);
 
-    if (ok && keep) {
+    if (ok && keep && hdr.bad) {
+        *head = hdr;                /* let read_entities report or count it */
+        head->v = NULL;
+        head->vcap = 0;
+    } else if (ok && keep) {
         bool mirror = false;
         ok = plane_ok(c, &hdr, &mirror);
         if (ok && mirror)
@@ -473,6 +523,25 @@ static const char *advice_for(const char *t)
     return "redraw it as lines, arcs or polylines";
 }
 
+/*
+ * An entity whose numbers are unusable. The editor counts it and carries on,
+ * so the rest of the drawing can still be traced over; generating a program
+ * refuses, because geometry quietly left out could be a gap in a tool path.
+ */
+static bool mark_degenerate(Ctx *c, const Ent *e)
+{
+    if (c->opt->lenient) {
+        if (!c->out->degenerate++)
+            rg_copy(c->out->degenerate_kind, sizeof c->out->degenerate_kind, e->type);
+        return true;
+    }
+    return fail(c, "line %d: the %s on layer %s has \"%s\" where a number should be, which "
+                   "is not a number at all — some CAD programs write that for an entity "
+                   "whose geometry has gone bad. Delete it in CAD, or import the drawing in "
+                   "the editor, which leaves such entities out and says how many",
+                e->bad_line, e->type, e->layer, e->bad_val);
+}
+
 static bool read_entities(Ctx *c)
 {
     Ent e = { 0 };
@@ -496,8 +565,12 @@ static bool read_entities(Ctx *c)
         const char *t = e.type;
         if (strcmp(t, "POLYLINE") == 0) {
             ok = do_polyline(c, &e);
+            if (ok && e.bad && on_layer(c, e.layer))
+                ok = mark_degenerate(c, &e);
         } else if (!on_layer(c, e.layer)) {
             continue;
+        } else if (e.bad) {
+            ok = mark_degenerate(c, &e);
         } else if (strcmp(t, "LINE") == 0) {
             ok = do_line(c, &e);
         } else if (strcmp(t, "ARC") == 0) {

@@ -5,6 +5,18 @@ a second release on the same day.
 
 ## [Unreleased]
 
+### Fixed
+
+- A DXF with `1.#QNAN`, `-1.#IND` or `1.#INF` in it — what a program built
+  against the Microsoft C runtime writes for a value that is not a number, and
+  what QCAD leaves behind for an entity whose geometry has gone bad — no
+  longer costs the whole import. The entity is left out and counted, and the
+  editor says how many and of what kind; generating a program still refuses,
+  naming the entity, its layer and the line, because geometry quietly dropped
+  could be a gap in a tool path. One dead vertex condemns its polyline, not
+  the drawing. A value that is neither a number nor one of those spellings is
+  still an error.
+
 ## [2026.09.16] — first alpha
 
 An alpha: everything below is tested against unit tests and, for the editor,

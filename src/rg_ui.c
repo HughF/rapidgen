@@ -760,6 +760,15 @@ static void plan_run(RgUi *ui)
                      ui->drawing.unsupported_kind);
             return;
         }
+        if (ui->drawing.degenerate) {
+            snprintf(ui->plan_err, sizeof ui->plan_err, "the drawing has %d %s%s with no real "
+                     "coordinates, which the editor leaves out: delete them in CAD, because a "
+                     "program must not be generated from a drawing with pieces missing",
+                     ui->drawing.degenerate,
+                     ui->drawing.degenerate_kind[0] ? ui->drawing.degenerate_kind : "entity",
+                     ui->drawing.degenerate == 1 ? "" : "s");
+            return;
+        }
         if (!rg_shape_build(&ui->drawing, ui->job.join_tolerance, &strict, err, sizeof err)) {
             snprintf(ui->plan_err, sizeof ui->plan_err, "%s", err);
             return;

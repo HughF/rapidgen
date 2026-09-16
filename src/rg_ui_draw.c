@@ -748,6 +748,15 @@ static void inspect_drawing(RgUi *ui)
                          ui->drawing.unsupported == 1 ? "" : "s", ui->drawing.unsupported_kind);
                 ui_label_wrap(ui, buf, t->warn);
             }
+            if (ui->drawing.degenerate) {
+                char buf[220];
+                snprintf(buf, sizeof buf, "%d %s%s left out: the drawing gives them no real "
+                         "coordinates. A program cannot be generated from this drawing until "
+                         "they are deleted in CAD.", ui->drawing.degenerate,
+                         ui->drawing.degenerate_kind[0] ? ui->drawing.degenerate_kind : "entity",
+                         ui->drawing.degenerate == 1 ? "" : "s");
+                ui_label_wrap(ui, buf, t->warn);
+            }
         }
     } else {
         ui_label_wrap(ui, "No drawing. Import the part's DXF to paint over it, or paint on "
