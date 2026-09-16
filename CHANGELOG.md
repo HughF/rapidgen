@@ -3,6 +3,32 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
+## [Unreleased]
+
+### Added
+
+- **A closed path is driven as a circuit.** Spraying is guiding the gun round
+  a path, lap after lap — not stopping at the end of one and starting again.
+  A stroke that closes on itself is now entered once, driven round `laps`
+  times with the seam blended, and left once. Previously every lap stopped
+  dead on the seam, lifted off and came back down, which laid a heavy patch
+  there each time.
+- **`laps`** for flat parts: times round a closed path before the gun leaves
+  it. The program repeats it as `FOR nLap FROM 1 TO n DO … ENDFOR` inside the
+  cycle loop, so the targets are written once however many laps are driven.
+
+### Fixed
+
+- **The operator prompt was asked on every cycle.** `TPReadFK` sat inside the
+  cycle loop, so a coating of thirty cycles stopped for the operator thirty
+  times. It is now asked once, before the loop. For a switched gun the
+  prompt no longer doubles as the gun's on signal; each stroke and band
+  switches its own gun, which is what the second and later ones already did.
+- The prompt said *"Rotator turning and gun ready?"* on a flat part, which
+  has no rotator.
+- The report's *Run on/off* line was printed even when every stroke was
+  closed and therefore had no run-on at all.
+
 ## [2026.09.16.2] — alpha, built for thermal spray
 
 ### Changed

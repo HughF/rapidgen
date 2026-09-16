@@ -244,14 +244,52 @@ static void test_flat_program(void)
     CHECK(count(s, "FOR nCycle FROM 1 TO 6 DO") == 1);
     CHECK(count(s, "ENDFOR") == 1);
     CHECK(count(s, "WaitTime 15;") == 1);
+    /* The operator is asked once, before the cycles, not on every one of them. */
     const char *prompt = strstr(s, "TPReadFK"), *loop = strstr(s, "FOR nCycle");
-    CHECK(prompt && loop && loop < prompt);
+    CHECK(prompt && loop && prompt < loop);
+    rg_buf_free(&b);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
+/*
+ * A stroke that closes on itself is driven as a circuit: in once, round it lap
+ * after lap without stopping on the seam, out once — not one lap per cycle
+ * with a lift and a re-approach between.
+ */
+static void test_circuit(void)
+{
+    char text[8192];
+    snprintf(text, sizeof text, "%s\nlaps = 12\n"
+             "stroke = 100 100  400 100  400 200  100 200  100 100\n", rg_job_template_flat());
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err) && rg_job_validate(&j, err, sizeof err));
+    RgPlan pl;
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    RgBuf b;
+    rg_buf_init(&b);
+    CHECK(rg_rapid_write(&j, &pl, "circuit.rgj", "2026-09-16 12:00", &b, err, sizeof err));
+    const char *s = b.s ? b.s : "";
+
+    CHECK(pl.circuits == 1 && pl.laps == 12);
+    CHECK(count(s, "VAR num nLap;") == 1);
+    CHECK(count(s, "FOR nLap FROM 1 TO 12 DO") == 1);
+    CHECK(count(s, "ENDFOR") == 2);                  /* the laps, and the cycles */
+    /* The gun never stops on the work: no fine zone on any sprayed move. */
+    CHECK(count(s, ",vRgSpray,fine,") == 0);
+    /* Asked once, before either loop. */
+    const char *prompt = strstr(s, "TPReadFK");
+    CHECK(prompt && prompt < strstr(s, "FOR nCycle") && prompt < strstr(s, "FOR nLap"));
+    /* The circuit closes on the point it started from, blended. */
+    CHECK(strstr(s, "! Stroke 3: 5 points, 800 mm a lap, 12 laps round") != NULL);
     rg_buf_free(&b);
     rg_plan_free(&pl);
     rg_job_free(&j);
 }
 
 TEST_MAIN("test_rapid",
+    test_circuit();
     test_flat_program();
     test_structure();
     test_targets();

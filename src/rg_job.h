@@ -120,6 +120,8 @@ typedef struct {
     double standoff;                  /* gun tip to surface                */
     int    coats;                     /* cylinder: traverses per band      */
     int    cycles;                    /* repeats of the whole pattern      */
+    int    laps;                      /* flat: times round a closed path,
+                                         without the gun leaving it       */
     double dwell;                     /* seconds between cycles, to let the part cool */
     double thickness_per_pass;        /* microns a single pass lays down, measured */
     double target_thickness;          /* microns wanted, for working out cycles    */

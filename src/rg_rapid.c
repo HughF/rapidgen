@@ -244,13 +244,18 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     for (int i = 0; i < pl->nmoves; i++)
         prompt |= pl->moves[i].after == RG_ACT_READY;
     bool loop = pl->cycles > 1;
+    bool laps = false;
+    for (int i = 0; i < pl->nmoves; i++)
+        laps |= pl->moves[i].lap_begin;
 
     rg_buf_puts(out, "\n  PROC main()\n");
     if (prompt)
         rg_buf_puts(out, "    VAR num nKey;\n");
     if (loop)
         rg_buf_puts(out, "    VAR num nCycle;\n");
-    if (prompt || loop)
+    if (laps)
+        rg_buf_puts(out, "    VAR num nLap;\n");
+    if (prompt || loop || laps)
         rg_buf_puts(out, "\n");
     rg_buf_puts(out, "    ConfJ \\Off;\n    ConfL \\Off;\n");
 
@@ -282,6 +287,9 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
             rg_buf_printf(out, "%s    ! %s\n", loop && i > 0 && i < pl->nmoves - 1 ? "  " : "",
                           m->note);
         (void)in;
+        /* Lap after lap round the circuit, without leaving the path. */
+        if (m->lap_begin)
+            rg_buf_printf(out, "      FOR nLap FROM 1 TO %d DO\n", pl->laps);
         switch (m->kind) {
         case RG_MV_HOME:
             if (d->moveabsj) {
@@ -301,9 +309,9 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
         }
         switch (m->after) {
         case RG_ACT_READY:
-            rg_buf_puts(out, "    TPReadFK nKey,\"Rotator turning and gun ready?\",\"\",\"\",\"\",\"\",\"Go\";\n");
-            if (j->gun_signal[0])
-                rg_buf_printf(out, "    SetDO %s,1;\n", j->gun_signal);
+            rg_buf_printf(out, "    TPReadFK nKey,\"%s\",\"\",\"\",\"\",\"\",\"Go\";\n",
+                          j->part == RG_PART_CYLINDER ? "Rotator turning and gun ready?"
+                                                      : "Gun ready?");
             break;
         case RG_ACT_GUN_ON:
             rg_buf_printf(out, "    SetDO %s,1;\n", j->gun_signal);
@@ -314,6 +322,8 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
         case RG_ACT_NONE:
             break;
         }
+        if (m->lap_end)
+            rg_buf_puts(out, "      ENDFOR\n");
     }
     rg_buf_puts(out, "    ConfJ \\On;\n    ConfL \\On;\n  ENDPROC\nENDMODULE\n");
 

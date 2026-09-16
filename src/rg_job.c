@@ -52,6 +52,7 @@ void rg_job_default(RgJob *j)
     j->standoff = UNSET;
     j->coats = 1;
     j->cycles = 1;
+    j->laps = 1;
     j->dwell = 0.0;
     j->thickness_per_pass = UNSET;
     j->target_thickness = UNSET;
@@ -205,6 +206,7 @@ static const Key keys[] = {
     { "standoff",        K_NUM,    F(standoff),        0,               10, 1000, G_PROC },
     { "coats",           K_INT,    F(coats),           0,               1, 50, G_PROC },
     { "cycles",          K_INT,    F(cycles),          0,               1, 999, G_PROC },
+    { "laps",            K_INT,    F(laps),            0,               1, 999, G_PROC },
     { "dwell",           K_NUM,    F(dwell),           0,               0, 600, G_PROC },
     { "thickness_per_pass", K_NUM, F(thickness_per_pass), 0,            0.01, 5000, G_PROC },
     { "target_thickness", K_NUM,   F(target_thickness), 0,              0.1, 100000, G_PROC },
@@ -666,7 +668,7 @@ void rg_job_write(const RgJob *j, RgBuf *b)
         bool cyl_only = k->group == G_CYL || k->type == K_BAND || k->type == K_START ||
                         strcmp(k->key, "coats") == 0 || strcmp(k->key, "wrap_tolerance") == 0;
         bool flat_only = k->group == G_FLAT || k->type == K_STROKE ||
-                         strcmp(k->key, "lead") == 0;
+                         strcmp(k->key, "lead") == 0 || strcmp(k->key, "laps") == 0;
         bool fan_only = strcmp(k->key, "fan_width") == 0 || strcmp(k->key, "fan_along") == 0;
         bool spot_only = strcmp(k->key, "spot_diameter") == 0;
         if ((fan_only && j->pattern != RG_PAT_FAN) || (spot_only && j->pattern != RG_PAT_SPOT))
@@ -916,6 +918,10 @@ const char *rg_job_template_flat(void)
 "step_over   = 6               # between passes; the fill tool uses it\n"
 "standoff    = 150\n"
 "cycles      = 6               # repeats of the whole pattern\n"
+"laps        = 1               # times round a stroke that closes on itself:\n"
+"                              # the gun drives the circuit lap after lap,\n"
+"                              # blending through the seam instead of stopping\n"
+"                              # and lifting off between laps\n"
 "dwell       = 15              # seconds between cycles, to let the part cool\n"
 "thickness_per_pass = 25       # microns a single pass lays down, as measured\n"
 "target_thickness   = 300      # microns wanted\n"

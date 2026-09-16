@@ -88,7 +88,7 @@ static void test_template_plan(void)
     CHECK(pl.nmoves == 7);
     CHECK(pl.moves[0].kind == RG_MV_HOME);
     CHECK(pl.moves[1].kind == RG_MV_JOINT);
-    CHECK(pl.moves[2].after == RG_ACT_READY);
+    CHECK(pl.moves[0].after == RG_ACT_READY);   /* asked once, before the cycles */
     CHECK(pl.moves[3].speed == RG_SPD_SPRAY && pl.moves[4].speed == RG_SPD_SPRAY);
     CHECK(pl.moves[6].kind == RG_MV_HOME);
 
@@ -186,7 +186,8 @@ static void test_bands(void)
         off += pl.moves[i].after == RG_ACT_GUN_OFF;
         ready += pl.moves[i].after == RG_ACT_READY;
     }
-    CHECK(ready == 1 && on == 1 && off == 2);   /* the prompt turns the gun on for band 1 */
+    /* The prompt is asked once at home; each band switches its own gun on. */
+    CHECK(ready == 1 && on == 2 && off == 2);
     CHECK(!has_issue(&pl, RG_WARN, "the gun runs continuously"));
     rg_plan_free(&pl);
 
@@ -358,7 +359,7 @@ static void test_flat(void)
         CHECK(pl.moves[1].kind == RG_MV_JOINT && pl.moves[1].group == 0);
         CHECK_NEAR(pl.moves[1].tcp.pos.z, 250.0, 1e-9);           /* standoff + approach */
         CHECK_NEAR(pl.moves[2].tcp.pos.z, 150.0, 1e-9);
-        CHECK(pl.moves[2].after == RG_ACT_READY);
+        CHECK(pl.moves[0].after == RG_ACT_READY);   /* asked once, before the cycles */
         /* the run-on starts the lead back along the first segment */
         CHECK_NEAR(pl.moves[2].tcp.pos.x, 50.0 - pl.lead_used, 1e-9);
         CHECK_NEAR(pl.moves[2].tcp.pos.y, 50.0, 1e-9);

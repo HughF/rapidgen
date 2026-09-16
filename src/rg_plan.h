@@ -61,6 +61,8 @@ typedef struct {
     double      joints[RG_AXES]; /* where the checker expects the arm to be    */
     int         cf[4];
     RgAction    after;           /* done once the arm is there                 */
+    bool        lap_begin;       /* a lap of a closed path starts here         */
+    bool        lap_end;         /* ...and closes on this move                 */
     int         group;           /* the band or stroke; -1 for neither         */
     char        note[80];        /* a comment written before the move          */
 } RgMove;
@@ -84,6 +86,8 @@ struct RgPlan {
 
     /* Building a coating takes many passes over many cycles. */
     int    cycles;
+    int    laps;                /* flat: times round each closed path      */
+    int    circuits;            /* flat: strokes driven round as a circuit */
     double dwell;               /* seconds between cycles                  */
     double cycle_time;          /* seconds spraying, one cycle             */
     double lead_used;           /* flat: run-on and run-off at each end    */

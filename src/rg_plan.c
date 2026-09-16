@@ -245,7 +245,9 @@ static void build_cylinder(Ctx *c)
     RgPlan *pl = c->pl;
     bool switched = j->gun == RG_GUN_SWITCHED && j->gun_signal[0];
 
-    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+    RgMove *start = add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+    if (start && j->ready_prompt)
+        start->after = RG_ACT_READY;   /* once, before the cycles, not every cycle */
     for (int b = 0; b < pl->nbands && !c->oom; b++) {
         const RgBand *bd = &pl->bands[b];
         double lo = bd->y0 - pl->overrun, hi = bd->y1 + pl->overrun;
@@ -260,9 +262,7 @@ static void build_cylinder(Ctx *c)
                               gun_cylinder(j, z_start, 0), b, NULL);
         if (!in)
             return;
-        if (b == 0 && j->ready_prompt)
-            in->after = RG_ACT_READY;
-        else if (switched)
+        if (switched)
             in->after = RG_ACT_GUN_ON;
 
         double z = z_start;
@@ -298,7 +298,9 @@ static void build_flat(Ctx *c)
     bool switched = j->gun == RG_GUN_SWITCHED && j->gun_signal[0];
     double lead = pl->lead_used;
 
-    add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+    RgMove *start = add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
+    if (start && j->ready_prompt)
+        start->after = RG_ACT_READY;
     for (int s = 0; s < j->nstrokes && !c->oom; s++) {
         const RgStroke *st = &j->strokes[s];
         bool closed = st->n > 2 && hypot(st->pts[st->n - 1].x - st->pts[0].x,
@@ -311,23 +313,30 @@ static void build_flat(Ctx *c)
         double len = 0.0;
         for (int k = 1; k < st->n; k++)
             len += hypot(st->pts[k].x - st->pts[k - 1].x, st->pts[k].y - st->pts[k - 1].y);
-        snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm%s", s + 1, st->n, len,
-                 use_lead > 0.0 ? ", run on and off" : closed ? ", closed" : "");
+        if (closed)
+            pl->circuits++;
+        if (closed && pl->laps > 1)
+            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm a lap, %d laps round",
+                     s + 1, st->n, len, pl->laps);
+        else
+            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm%s", s + 1, st->n, len,
+                     use_lead > 0.0 ? ", run on and off" : closed ? ", a closed circuit" : "");
 
         add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_flat(j, first, j->approach),
                  s, note);
-        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_FINE, gun_flat(j, first, 0),
-                              s, NULL);
+        /* A circuit is entered already moving: the gun must not stop on the
+         * seam, or it lays a heavy patch there every lap. */
+        RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH,
+                              closed ? RG_Z_SMALL : RG_Z_FINE, gun_flat(j, first, 0), s, NULL);
         if (!in)
             return;
-        if (s == 0 && j->ready_prompt)
-            in->after = RG_ACT_READY;
-        else if (switched)
+        if (switched)
             in->after = RG_ACT_GUN_ON;
 
         /* The run-on, then the stroke, then the run-off: rounded corners
          * throughout so the gun never stops over the work. */
         RgMove *last = in;
+        int lap_first = -1;
         RgPt at = first;
         for (int k = 0; k < st->n; k++) {
             if (hypot(st->pts[k].x - at.x, st->pts[k].y - at.y) < 1e-6)
@@ -336,6 +345,16 @@ static void build_flat(Ctx *c)
             last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_SMALL, gun_flat(j, at, 0), s, NULL);
             if (!last)
                 return;
+            if (lap_first < 0)
+                lap_first = pl->nmoves - 1;
+        }
+        /* Round and round the circuit, the seam blended, rather than lifting
+         * off and coming back down for every lap. The laps are marked by
+         * index, not by pointer: add_move reallocs, so an RgMove * taken
+         * before the next one may already be dead. */
+        if (closed && pl->laps > 1 && lap_first >= 0 && lap_first < pl->nmoves - 1) {
+            pl->moves[lap_first].lap_begin = true;
+            pl->moves[pl->nmoves - 1].lap_end = true;
         }
         if (use_lead > 0.0 && hypot(last_pt.x - at.x, last_pt.y - at.y) > 1e-6) {
             at = last_pt;
@@ -343,8 +362,8 @@ static void build_flat(Ctx *c)
             if (!last)
                 return;
         }
-        /* Stop only once the gun is clear of the work. */
-        last->zone = use_lead > 0.0 ? RG_Z_TRAVEL : RG_Z_FINE;
+        /* Stop only once the gun is clear of the work; a circuit never stops. */
+        last->zone = use_lead > 0.0 ? RG_Z_TRAVEL : closed ? RG_Z_SMALL : RG_Z_FINE;
         if (switched)
             last->after = RG_ACT_GUN_OFF;
         add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_flat(j, at, j->approach),
@@ -659,6 +678,10 @@ static void check_flat(Ctx *c)
         const RgStroke *st = &j->strokes[s];
         if (st->n < 2)
             issue(c, RG_REFUSE, "stroke %d has only one point", s + 1);
+        /* A circuit is sprayed once per lap, so it lays down that much length. */
+        bool circuit = st->n > 2 && hypot(st->pts[st->n - 1].x - st->pts[0].x,
+                                          st->pts[st->n - 1].y - st->pts[0].y) < 1e-6;
+        int reps = circuit ? pl->laps : 1;
         for (int k = 0; k < st->n; k++) {
             RgPt p = st->pts[k];
             x0 = fmin(x0, p.x); x1 = fmax(x1, p.x);
@@ -666,7 +689,7 @@ static void check_flat(Ctx *c)
             if (k > 0) {
                 double dx = p.x - st->pts[k - 1].x, dy = p.y - st->pts[k - 1].y;
                 double len = hypot(dx, dy);
-                pl->stroke_length += len;
+                pl->stroke_length += len * reps;
                 /* A segment running along the fan paints a line the fan's
                  * thickness, not a band its width. */
                 if (len > 1e-9 && fabs((dx * fx + dy * fy) / len) > cos(30.0 * RG_DEG))
@@ -684,6 +707,13 @@ static void check_flat(Ctx *c)
             }
         }
     }
+    if (pl->laps > 1 && pl->circuits > 0 && pl->circuits < j->nstrokes)
+        issue(c, RG_NOTE, "the %d lap%s apply only to the %d closed circuit%s; the open strokes "
+              "are sprayed once a cycle, so the thickness estimate counts one lap",
+              pl->laps, pl->laps == 1 ? "" : "s", pl->circuits, pl->circuits == 1 ? "" : "s");
+    if (pl->laps > 1 && pl->circuits == 0)
+        issue(c, RG_NOTE, "laps = %d has no effect: no stroke closes on itself, so there is no "
+              "circuit to drive round. Close a stroke to spray it lap after lap", pl->laps);
     if (pl->sharp_corners)
         issue(c, RG_NOTE, "the gun turns more than %.0f deg at %d point%s along the strokes: "
               "the robot slows through each corner, so the coat is heavier there",
@@ -800,6 +830,7 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     double width = rg_job_width(job);
     pl->pitch = rg_job_step(job);
     pl->cycles = job->cycles;
+    pl->laps = job->laps;
     pl->dwell = job->dwell;
     pl->passes_per_point = pl->pitch > 0.0 ? width / pl->pitch : 0.0;
     if (c.flat) {
@@ -853,16 +884,31 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
         follow(&c);
     check_limits(&c);
 
-    for (int i = 1; i < pl->nmoves; i++)
+    /* The moves inside a circuit are driven once a lap, so they cost that
+     * many times their length. */
+    int reps = 1;
+    for (int i = 1; i < pl->nmoves; i++) {
+        if (pl->moves[i].lap_begin)
+            reps = pl->laps;
         if (pl->moves[i].speed == RG_SPD_SPRAY)
-            pl->cycle_time += rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
-                                                  pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
+            pl->cycle_time += reps * rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
+                                                         pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
+        if (pl->moves[i].lap_end)
+            reps = 1;
+    }
     pl->spray_time = pl->cycle_time * pl->cycles;
 
     /* Thickness from the operator's own measured figure, not a model of the
      * process: what one pass lays down, times the passes each point gets. */
     if (!isnan(job->thickness_per_pass)) {
-        pl->thickness_cycle = job->thickness_per_pass * pl->passes_per_point;
+        /* A circuit lays one pass over its own path each lap: the passes do
+         * not lie beside each other the way a fill's do, so it is the laps
+         * that count, not the passes per point. Mixed with open strokes there
+         * is no one honest multiplier, so the estimate stays at a single lap
+         * and check_flat says so. */
+        bool all_circuits = pl->circuits > 0 && pl->circuits == job->nstrokes;
+        pl->thickness_cycle = all_circuits ? job->thickness_per_pass * pl->laps
+                                           : job->thickness_per_pass * pl->passes_per_point;
         pl->thickness_total = pl->thickness_cycle * pl->cycles;
         if (!isnan(job->target_thickness) && pl->thickness_cycle > 0.0) {
             pl->cycles_for_target = (int)ceil(job->target_thickness / pl->thickness_cycle - 1e-9);

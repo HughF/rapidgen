@@ -320,6 +320,10 @@ static void settings_process(RgUi *ui)
     number(ui, "Standoff", "Gun tip to the surface", &j->standoff, 150, 10, 1000, 5, "mm");
     ui_prop_int(ui, "Cycles", "Repeats of the whole pattern: a coating is built up over many "
                 "passes", &j->cycles, 1, 999, "");
+    if (j->part == RG_PART_FLAT)
+        ui_prop_int(ui, "Laps", "Times round a closed path before the gun leaves it. The gun "
+                    "drives the circuit lap after lap, blending through the seam, instead of "
+                    "stopping and lifting off each time", &j->laps, 1, 999, "");
     ui_prop(ui, "Dwell", "Seconds between cycles, to let the part cool. Part temperature "
             "itself is not modelled", &j->dwell, 0, 600, 1, "s");
     number(ui, "Per pass", "Microns a single pass lays down, as you have measured it. Used "

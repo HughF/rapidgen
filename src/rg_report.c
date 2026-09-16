@@ -91,10 +91,15 @@ static void flat(RgBuf *b, const RgJob *j, const RgPlan *pl)
                      "            robot base frame\n", j->plane.x, j->plane.y, j->plane.z);
     rg_buf_printf(b, "Strokes     %d, %.0f mm a cycle, at %.0f mm/s\n", j->nstrokes,
                   pl->stroke_length, pl->spray_speed);
+    if (pl->circuits && pl->laps > 1)
+        rg_buf_printf(b, "Circuits    %d closed path%s, driven round %d times without the gun "
+                         "leaving the work\n", pl->circuits, pl->circuits == 1 ? "" : "s",
+                      pl->laps);
     gun_line(b, j, pl);
-    if (pl->lead_used > 0.0)
-        rg_buf_printf(b, "Run on/off  %.1f mm at each end (%.1f mm needed to reach speed)\n",
-                      pl->lead_used, pl->lead_needed);
+    if (pl->lead_used > 0.0 && pl->circuits < j->nstrokes)
+        rg_buf_printf(b, "Run on/off  %.1f mm at each end (%.1f mm needed to reach speed)%s\n",
+                      pl->lead_used, pl->lead_needed,
+                      pl->circuits ? ", on the open strokes" : "");
     coating_line(b, j, pl);
 }
 

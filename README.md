@@ -76,6 +76,12 @@ approach distance between strokes. More than one stroke needs `gun_signal`,
 because the gun has to be off in between; sharp corners are counted and
 reported, since the robot slows through each one and the coat builds up.
 
+A stroke that **closes on itself is driven as a circuit**: the gun comes in
+once, goes round it `laps` times with the seam blended, and leaves once. That
+is how a torch is actually driven — round the path, lap after lap — rather
+than stopping at the end of each lap and coming back down to start the next,
+which lays a heavy patch on the seam every time.
+
 Each open stroke is **run on and off**: extended past both ends by `lead` —
 by default far enough to reach spray speed and stop again, worked out from the
 speed and the acceleration — so the gun is never changing speed over the work.
