@@ -145,7 +145,7 @@ struct RgUi {
     /* the fill tool's preview of the region under the pointer */
     RgStroke *preview;
     int       npreview, preview_loop;
-    double    preview_key[5];   /* pitch, angle, extend, scale, spiral */
+    double    preview_key[6];   /* pitch, angle, extend, scale, spiral, runout */
 
     /* What Fill or Trace last made, so clicking a region again replaces its
      * path instead of laying another on top. Checked against the job before

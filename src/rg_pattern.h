@@ -59,6 +59,9 @@ typedef struct {
     double angle_deg;   /* direction of the passes, from drawing X          */
     double extend;      /* each pass runs this far past the region's own
                            outline; at a hole's edge it stops on the edge  */
+    double runout;      /* then this much further, off the work, before it
+                           turns round or leaves: 0 for none. Only beyond
+                           the region's own outline, never into a hole     */
 } RgFillOpts;
 
 /*
@@ -66,7 +69,10 @@ typedef struct {
  * lie inside it. Passes are spaced evenly at no more than `pitch`. Where
  * consecutive passes each cross the region once they are joined into one
  * zig-zag stroke, turning outside the edge; otherwise each piece of a pass
- * is its own stroke. Returns the number of strokes, -1 out of memory.
+ * is its own stroke. With a `runout` each pass carries on off the work past
+ * the outline, marked off in the stroke, so a weave comes onto the work at
+ * speed, turns round clear of it and leaves the same way. Returns the number
+ * of strokes, -1 out of memory.
  */
 int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke **out);
 

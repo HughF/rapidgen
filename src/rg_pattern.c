@@ -210,11 +210,12 @@ typedef struct {
 } Strokes;
 
 typedef struct {
-    RgPt *p;
-    int n, cap;
+    RgPt          *p;
+    unsigned char *off;
+    int            n, cap;
 } Pts;
 
-static bool pts_add(Pts *v, double x, double y)
+static bool pts_add_off(Pts *v, double x, double y, bool off)
 {
     if (v->n == v->cap) {
         int cap = v->cap ? v->cap * 2 : 32;
@@ -222,12 +223,31 @@ static bool pts_add(Pts *v, double x, double y)
         if (!q)
             return false;
         v->p = q;
+        unsigned char *f = realloc(v->off, (size_t)cap);
+        if (!f)
+            return false;
+        v->off = f;
         v->cap = cap;
     }
     v->p[v->n].x = x;
     v->p[v->n].y = y;
+    v->off[v->n] = off;
     v->n++;
     return true;
+}
+
+static bool pts_add(Pts *v, double x, double y)
+{
+    return pts_add_off(v, x, y, false);
+}
+
+static void pts_free(Pts *v)
+{
+    free(v->p);
+    free(v->off);
+    v->p = NULL;
+    v->off = NULL;
+    v->n = v->cap = 0;
 }
 
 /* Hands the points over to the list (and resets v), rotated back to the
@@ -254,11 +274,20 @@ static bool strokes_take(Strokes *list, Pts *v, double ca, double sa)
     RgPt *owned = realloc(v->p, (size_t)v->n * sizeof *owned);
     list->s[list->n].pts = owned ? owned : v->p;
     list->s[list->n].n = v->n;
-    /* Generated paths carry no off-the-work stretches of their own yet. The
-     * list is realloc'd, so this would otherwise be whatever was in memory. */
-    list->s[list->n].off = NULL;
+    /* The flags go with the points only when they say something; the list
+     * is realloc'd, so the field must be set either way. */
+    int noff = 0;
+    for (int i = 0; i < v->n; i++)
+        noff += v->off[i] != 0;
+    if (noff > 0 && noff < v->n) {
+        list->s[list->n].off = v->off;
+    } else {
+        list->s[list->n].off = NULL;
+        free(v->off);
+    }
     list->n++;
     v->p = NULL;
+    v->off = NULL;
     v->n = v->cap = 0;
     return true;
 }
@@ -389,17 +418,17 @@ int rg_pattern_spiral(const RgShape *s, int which, double first, double pitch, R
     free(ring);
 
     if (!ok || !any) {
-        free(cur.p);
+        pts_free(&cur);
         return ok ? 0 : -1;
     }
 
     Strokes list = { 0 };
     if (!strokes_take(&list, &cur, 1.0, 0.0)) {     /* already in drawing axes */
-        free(cur.p);
+        pts_free(&cur);
         rg_strokes_free(list.s, list.n);
         return -1;
     }
-    free(cur.p);
+    pts_free(&cur);
     *out = list.s;
     return list.n;
 }
@@ -452,6 +481,7 @@ int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke *
     if (rows < 1)
         rows = 1;
     double step = (y1 - y0) / rows, e = o->extend;
+    double runout = o->runout > 0.0 ? o->runout : 0.0;   /* not `r`: the rows are */
 
     Strokes list = { 0 };
     Pts cur = { 0 };
@@ -484,12 +514,20 @@ int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke *
         }
         for (int k = 0; ok && k < count; k++) {
             int idx = dir > 0 ? k : count - 1 - k;
-            double xa = xs[2 * idx].x - (xs[2 * idx].outer ? e : 0.0);
-            double xb = xs[2 * idx + 1].x + (xs[2 * idx + 1].outer ? e : 0.0);
-            if (dir > 0)
-                ok = pts_add(&cur, xa, y) && pts_add(&cur, xb, y);
-            else
-                ok = pts_add(&cur, xb, y) && pts_add(&cur, xa, y);
+            bool outer_a = xs[2 * idx].outer, outer_b = xs[2 * idx + 1].outer;
+            double xa = xs[2 * idx].x - (outer_a ? e : 0.0);
+            double xb = xs[2 * idx + 1].x + (outer_b ? e : 0.0);
+            /* Past the region's own outline the gun carries on off the work,
+             * far enough to turn round or leave without slowing over it. Not
+             * at a hole's edge: that would coat what is meant to stay bare. */
+            double from = dir > 0 ? xa : xb, to = dir > 0 ? xb : xa, sgn = dir > 0 ? 1.0 : -1.0;
+            double r_from = (dir > 0 ? outer_a : outer_b) ? runout : 0.0;
+            double r_to = (dir > 0 ? outer_b : outer_a) ? runout : 0.0;
+            if (r_from > 0.0)
+                ok = pts_add_off(&cur, from - sgn * r_from, y, true);
+            ok = ok && pts_add(&cur, from, y) && pts_add(&cur, to, y);
+            if (ok && r_to > 0.0)
+                ok = pts_add_off(&cur, to + sgn * r_to, y, true);
             if (ok && count > 1)
                 ok = strokes_take(&list, &cur, ca, sa);
         }
@@ -499,7 +537,7 @@ int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke *
     if (ok)
         ok = strokes_take(&list, &cur, ca, sa);
 
-    free(cur.p);
+    pts_free(&cur);
     free(use);
     free(rot);
     free(xs);

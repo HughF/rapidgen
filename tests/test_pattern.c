@@ -214,6 +214,65 @@ static void test_spiral(void)
     rg_drawing_free(&d);
 }
 
+/*
+ * A weave with run-outs: each pass carries on past the outline, off the work,
+ * so the gun comes on at speed, turns round clear of the part, and leaves.
+ */
+static void test_fill_runout(void)
+{
+    char r[512], hole[512], both[1024];
+    RgDrawing d;
+    RgShape s;
+    int skipped;
+    CHECK(drawing_of(rect(r, sizeof r, 0, 0, 100, 60), &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+
+    RgFillOpts o = { 10, 0, 0, 30 };
+    RgStroke *st;
+    int n = rg_pattern_fill(&s, 0, &o, &st);
+    CHECK(n == 1);
+    if (n == 1) {
+        /* six passes, each: off, on, on, off */
+        CHECK(st[0].n == 24);
+        CHECK(st[0].off != NULL);
+        int noff = 0;
+        bool shape = true;
+        for (int k = 0; k < st[0].n && st[0].off; k++) {
+            noff += st[0].off[k];
+            shape = shape && st[0].off[k] == (k % 4 == 0 || k % 4 == 3);
+            /* off the work is outside the outline, on the work inside it */
+            if (st[0].off[k])
+                shape = shape && (st[0].pts[k].x < -29.9 || st[0].pts[k].x > 129.9);
+            else
+                shape = shape && st[0].pts[k].x > -1e-9 && st[0].pts[k].x < 100 + 1e-9;
+        }
+        CHECK(noff == 12);
+        CHECK(shape);
+        CHECK_NEAR(st[0].pts[0].x, -30, 1e-9);            /* comes on from outside */
+        CHECK_NEAR(st[0].pts[4].x, 130, 1e-9);            /* second pass turned beyond */
+        rg_strokes_free(st, n);
+    }
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+
+    /* With a hole, a pass runs out past the outline but never into the hole. */
+    snprintf(both, sizeof both, "%s%s", rect(r, sizeof r, 0, 0, 100, 60),
+             rect(hole, sizeof hole, 40, 20, 60, 40));
+    CHECK(drawing_of(both, &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+    n = rg_pattern_fill(&s, 0, &o, &st);
+    CHECK(n > 1);
+    bool clear = true;
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < st[i].n; k++)
+            if (rg_stroke_off(&st[i], k))
+                clear = clear && !rg_loop_contains(&s.loops[0], st[i].pts[k]);
+    CHECK(clear);
+    rg_strokes_free(st, n);
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+}
+
 static void test_fill(void)
 {
     char a[512], b[512], both[1024];
@@ -223,7 +282,7 @@ static void test_fill(void)
 
     CHECK(drawing_of(rect(a, sizeof a, 0, 0, 100, 40), &d));
     CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
-    RgFillOpts o = { 10, 0, 5 };
+    RgFillOpts o = { 10, 0, 5, 0 };
     RgStroke *st;
     int n = rg_pattern_fill(&s, 0, &o, &st);
     CHECK(n == 1);                              /* one zig-zag */
@@ -292,5 +351,6 @@ TEST_MAIN("test_pattern",
     test_trace();
     test_lenient();
     test_fill();
+    test_fill_runout();
     test_spiral();
 )

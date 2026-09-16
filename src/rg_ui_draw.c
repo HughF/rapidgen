@@ -15,9 +15,10 @@
  * it, and the tools that paint it
  *
  * The canvas shows drawing millimetres with Y up, as CAD does. Each stroke is
- * drawn twice: a translucent band as wide as the spray fan — what will
- * actually be coated — and its centre line, with a number at its start and
- * arrows along it, because the order and direction are the program.
+ * drawn twice: a band as wide as the spray over the stretches on the work -
+ * what will actually be coated - and its centre line, with a number at its
+ * start and arrows along it, because the order and direction are the program.
+ * Lead-ins, run-outs and turnarounds, off the work, are drawn faint and thin.
  *
  * Tools:
  *   Select  pick a stroke; drag to pan, scroll to zoom
@@ -54,8 +55,9 @@ static const char *TOOL_TIP[TOOL_COUNT] = {
     "Paint a stroke freehand. It is smoothed when you let go (D)",
     "Trace an outline: click near it, and the gun goes round once from that "
     "point, inset by the amount set (T)",
-    "Fill a region: click inside an outline to cover it with passes a fan "
-    "a step-over apart, or rings following it inward. Hover to preview (F)",
+    "Fill a region: click inside an outline to cover it with passes a step-over "
+    "apart, turning round off the work, or with rings following it inward. Hover to "
+    "preview (F)",
     "Scale the drawing: click two points a known distance apart, then type the "
     "true distance (M)",
 };
@@ -116,6 +118,24 @@ static double fill_pitch(const RgUi *ui)
 static double spray_width(const RgUi *ui)
 {
     return rg_job_width(&ui->job);
+}
+
+/*
+ * How far off the work the gun runs before it turns round or leaves: the
+ * shop's rule of 5 x the spot, or further if the gun needs more than that to
+ * reach spray speed and stop again. The robot does not switch the torch, so
+ * this is where the gun comes on and goes off the work.
+ */
+static double turn_length(const RgUi *ui)
+{
+    const RgJob *j = &ui->job;
+    double w = spray_width(ui);
+    if (!(w > 0.0))
+        return 0.0;
+    double t = 5.0 * w;
+    if (j->spray_speed > 0.0 && j->accel > 0.0)
+        t = fmax(t, j->spray_speed * j->spray_speed / (2.0 * j->accel) + 0.5 * w);
+    return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -361,15 +381,52 @@ static void arrow(RgUi *ui, struct nk_command_buffer *cb, float ax, float ay, fl
                      mx - dx * s + dy * s * 0.7f, my - dy * s - dx * s * 0.7f, col);
 }
 
-/* What the stroke coats. Drawn under the drawing, because it is opaque. */
+/* What the stroke coats on the part: the band follows only the stretches on
+ * the work. Drawn under the drawing, because it is opaque. */
 static void draw_stroke_band(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st,
                              bool selected)
 {
     const RgTheme *t = ui->theme;
     struct nk_color line = selected ? t->warn : t->trace_a;
     float fan = (float)(spray_width(ui) * ui->zoom);
-    if (isfinite(fan) && fan > S(ui, 3))
-        band(ui, cb, st->pts, st->n, fan, over(t->plot_bg, line, selected ? 70 : 42));
+    if (!isfinite(fan) || fan <= S(ui, 3))
+        return;
+    struct nk_color col = over(t->plot_bg, line, selected ? 70 : 42);
+    for (int a = 0; a < st->n;) {
+        if (rg_stroke_off(st, a)) {
+            a++;
+            continue;
+        }
+        int b = a;
+        while (b + 1 < st->n && rg_stroke_work_seg(st, b + 1))
+            b++;
+        if (b > a)
+            band(ui, cb, st->pts + a, b - a + 1, fan, col);
+        a = b + 1;
+    }
+}
+
+/*
+ * A path with its stretches off the work drawn apart from the work: thinner
+ * and faint, so a lead-in, run-out or turnaround reads as the gun passing
+ * by, not as coating.
+ */
+static void draw_path(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st, float thick,
+                      struct nk_color col, bool arrows)
+{
+    if (!st->off) {
+        polyline(ui, cb, st->pts, st->n, false, thick, col);
+    } else {
+        for (int k = 1; k < st->n; k++) {
+            bool work = rg_stroke_work_seg(st, k);
+            polyline(ui, cb, st->pts + k - 1, 2, false, work ? thick : thick * 0.6f,
+                     work ? col : alpha(col, 110));
+        }
+    }
+    for (int k = 1; arrows && k < st->n; k++)
+        arrow(ui, cb, to_sx(ui, st->pts[k - 1].x), to_sy(ui, st->pts[k - 1].y),
+              to_sx(ui, st->pts[k].x), to_sy(ui, st->pts[k].y),
+              rg_stroke_work_seg(st, k) ? col : alpha(col, 110));
 }
 
 static void draw_stroke(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st, int index,
@@ -377,11 +434,7 @@ static void draw_stroke(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *
 {
     const RgTheme *t = ui->theme;
     struct nk_color line = selected ? t->warn : t->trace_a;
-    polyline(ui, cb, st->pts, st->n, false, S(ui, selected || hovered ? 2.6f : 1.8f), line);
-
-    for (int k = 1; k < st->n; k++)
-        arrow(ui, cb, to_sx(ui, st->pts[k - 1].x), to_sy(ui, st->pts[k - 1].y),
-              to_sx(ui, st->pts[k].x), to_sy(ui, st->pts[k].y), line);
+    draw_path(ui, cb, st, S(ui, selected || hovered ? 2.6f : 1.8f), line, true);
 
     float x0 = to_sx(ui, st->pts[0].x), y0 = to_sy(ui, st->pts[0].y);
     dot(cb, x0, y0, S(ui, 4.5f), line);
@@ -409,19 +462,57 @@ static void draft_add(RgUi *ui, RgPt p)
     ui->draft[ui->ndraft++] = p;
 }
 
-static void commit_stroke(RgUi *ui, const RgPt *pts, int n, const char *how)
+static void commit_stroke(RgUi *ui, const RgPt *pts, int n, const unsigned char *off,
+                          const char *how)
 {
     if (n < 2) {
         ui_message(ui, true, "A stroke needs at least two points.");
         return;
     }
-    if (!rg_job_add_stroke(&ui->job, pts, n)) {
+    if (!rg_job_add_stroke_off(&ui->job, pts, n, off)) {
         ui_message(ui, true, "Out of memory.");
         return;
     }
     ui->selected = ui->job.nstrokes - 1;
     ui_message(ui, false, "%s stroke %d: %d points, %.0f mm", how, ui->job.nstrokes, n,
                rg_stroke_length(pts, n));
+}
+
+/*
+ * A drawn open stroke gets a straight lead-in and run-out along its end
+ * segments, off the work. The robot does not switch the torch, so the gun has
+ * to be up to speed before it reaches the work and clear of it before it
+ * slows. A closed stroke is a circuit and has no end to add them to.
+ */
+static void commit_drawn(RgUi *ui, const RgPt *pts, int n, const char *how)
+{
+    double t = turn_length(ui);
+    if (n < 2 || !(t > 0.0) || (n > 2 && dist(pts[0], pts[n - 1]) < 1e-6)) {
+        commit_stroke(ui, pts, n, NULL, how);
+        return;
+    }
+    double d0 = dist(pts[0], pts[1]), d1 = dist(pts[n - 2], pts[n - 1]);
+    if (d0 < 1e-9 || d1 < 1e-9) {
+        commit_stroke(ui, pts, n, NULL, how);
+        return;
+    }
+    RgPt *p = malloc((size_t)(n + 2) * sizeof *p);
+    unsigned char *off = calloc((size_t)(n + 2), 1);
+    if (!p || !off) {
+        free(p);
+        free(off);
+        ui_message(ui, true, "Out of memory.");
+        return;
+    }
+    p[0].x = pts[0].x + (pts[0].x - pts[1].x) / d0 * t;
+    p[0].y = pts[0].y + (pts[0].y - pts[1].y) / d0 * t;
+    memcpy(p + 1, pts, (size_t)n * sizeof *p);
+    p[n + 1].x = pts[n - 1].x + (pts[n - 1].x - pts[n - 2].x) / d1 * t;
+    p[n + 1].y = pts[n - 1].y + (pts[n - 1].y - pts[n - 2].y) / d1 * t;
+    off[0] = off[n + 1] = 1;
+    commit_stroke(ui, p, n + 2, off, how);
+    free(p);
+    free(off);
 }
 
 /*
@@ -457,7 +548,7 @@ static void remember_generated(RgUi *ui, int loop, int first, int count)
 static void finish_line(RgUi *ui)
 {
     if (ui->ndraft >= 2)
-        commit_stroke(ui, ui->draft, ui->ndraft, "Painted");
+        commit_drawn(ui, ui->draft, ui->ndraft, "Painted");
     else if (ui->ndraft)
         ui_message(ui, true, "A stroke needs at least two points.");
     ui->ndraft = 0;
@@ -470,7 +561,7 @@ static void finish_freehand(RgUi *ui)
         RgPt *out = malloc((size_t)ui->ndraft * sizeof *out);
         if (out) {
             int n = rg_simplify(ui->draft, ui->ndraft, ui->smoothing, out);
-            commit_stroke(ui, out, n, "Drew");
+            commit_drawn(ui, out, n, "Drew");
             free(out);
         }
     }
@@ -487,7 +578,7 @@ static void trace_loop(RgUi *ui, int loop, RgPt near)
     }
     drop_generated(ui, loop);
     int before = ui->job.nstrokes;
-    commit_stroke(ui, pts, n, "Traced an outline as");
+    commit_stroke(ui, pts, n, NULL, "Traced an outline as");
     if (ui->job.nstrokes == before + 1)
         remember_generated(ui, loop, before, 1);
     else
@@ -516,7 +607,7 @@ static void fill_loop(RgUi *ui, int loop)
             return;
         }
     } else {
-        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0 };
+        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0, turn_length(ui) };
         n = rg_pattern_fill(&ui->shape, loop, &o, &st);
         if (n <= 0) {
             ui_message(ui, n < 0, n < 0 ? "Out of memory." : "There is nothing to fill there.");
@@ -526,7 +617,7 @@ static void fill_loop(RgUi *ui, int loop)
     drop_generated(ui, loop);
     int before = ui->job.nstrokes, added = 0;
     for (int i = 0; i < n; i++)
-        added += rg_job_add_stroke(&ui->job, st[i].pts, st[i].n);
+        added += rg_job_add_stroke_off(&ui->job, st[i].pts, st[i].n, st[i].off);
     rg_strokes_free(st, n);
     ui->selected = ui->job.nstrokes - 1;
     if (added > 0)
@@ -547,8 +638,8 @@ static void update_fill_preview(RgUi *ui)
     /* The spiral flag belongs in the key: without it, flipping the toggle
      * leaves the previous pattern on screen, and the preview is what the
      * region is aimed with. */
-    double key[5] = { pitch, ui->fill_angle, ui->fill_extend ? spray_width(ui) : 0.0,
-                      ui->shown_scale, ui->fill_spiral ? 1.0 : 0.0 };
+    double key[6] = { pitch, ui->fill_angle, ui->fill_extend ? spray_width(ui) : 0.0,
+                      ui->shown_scale, ui->fill_spiral ? 1.0 : 0.0, turn_length(ui) };
     bool want = ui->tool == TOOL_FILL && ui->hover_loop >= 0 && pitch > 0.5 && painting(ui);
     if (!want) {
         clear_preview(ui);
@@ -562,7 +653,7 @@ static void update_fill_preview(RgUi *ui)
     if (ui->fill_spiral) {
         n = rg_pattern_spiral(&ui->shape, ui->hover_loop, half, pitch, &ui->preview);
     } else {
-        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0 };
+        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0, turn_length(ui) };
         n = rg_pattern_fill(&ui->shape, ui->hover_loop, &o, &ui->preview);
     }
     ui->npreview = n > 0 ? n : 0;
@@ -774,8 +865,7 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
         }
     }
     for (int i = 0; i < ui->npreview; i++)
-        polyline(ui, cb, ui->preview[i].pts, ui->preview[i].n, false, S(ui, 1.3f),
-                 alpha(t->trace_a, 150));
+        draw_path(ui, cb, &ui->preview[i], S(ui, 1.3f), alpha(t->trace_a, 150), false);
 
     for (int s = 0; s < ui->job.nstrokes; s++)
         draw_stroke(ui, cb, &ui->job.strokes[s], s, s == ui->selected, s == ui->hover_stroke);
@@ -1004,6 +1094,8 @@ static void inspect_tool(RgUi *ui)
                          spray_width(ui) / p);
         else
             ui_info_row(ui, "Spacing", "set the spot and step-over");
+        if (!ui->fill_spiral && turn_length(ui) > 0.0)
+            ui_info_rowf(ui, "Turns", "%.0f mm off the work, then back", turn_length(ui));
         if (!ui->fill_spiral)
             ui_check(ui, "Run past the edge", "Carry each pass half the gun's width past the "
                      "outline so the edge gets a full coat. Passes stop at the edge of a hole, "
@@ -1059,6 +1151,12 @@ static void reverse_stroke(RgStroke *st)
         RgPt tmp = st->pts[a];
         st->pts[a] = st->pts[b];
         st->pts[b] = tmp;
+        /* the lead-in becomes the run-out: the flags go with their points */
+        if (st->off) {
+            unsigned char f = st->off[a];
+            st->off[a] = st->off[b];
+            st->off[b] = f;
+        }
     }
 }
 
