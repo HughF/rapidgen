@@ -544,6 +544,19 @@ static void test_tabs(void)
     rg_plan_free(&pl);
     rg_job_free(&j);
 
+    /* Tabs made exactly 28.5 mm read back from a file a hair short: not a
+     * shortfall. A tenth of a millimetre is. */
+    only_stroke(&j, "stroke = 21.5004 200 | 50 200  450 200 | 478.4996 200");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.short_tabs == 0);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+    only_stroke(&j, "stroke = 21.6 200 | 50 200  450 200 | 478.5 200");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.short_tabs == 1);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
     /* A run-out drawn, no lead-in: that end is still run on by lead. */
     only_stroke(&j, "stroke = | 50 200  450 200 | 510 200");
     CHECK(rg_plan_build(&j, NULL, &pl));

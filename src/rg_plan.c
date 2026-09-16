@@ -909,7 +909,9 @@ static void check_flat(Ctx *c)
                 continue;
             bool to_end;
             double len = leaves ? off_run(st, k, +1, &to_end) : off_run(st, k + 1, -1, &to_end);
-            if (len + 1e-6 >= pl->lead_needed)
+            /* A job file keeps points to 0.001 mm, so a run made exactly as
+             * long as needed can read back a few ten-thousandths short. */
+            if (len + 0.01 >= pl->lead_needed)
                 continue;
             if (!pl->short_tabs || len < pl->shortest_tab) {
                 pl->shortest_tab = len;
