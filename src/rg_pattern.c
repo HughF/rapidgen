@@ -254,6 +254,11 @@ static bool strokes_take(Strokes *list, Pts *v, double ca, double sa)
     RgPt *owned = realloc(v->p, (size_t)v->n * sizeof *owned);
     list->s[list->n].pts = owned ? owned : v->p;
     list->s[list->n].n = v->n;
+    /* Generated paths carry no tabs of their own; the caller puts them on.
+     * The list is realloc'd, so these would otherwise be whatever was in
+     * that memory. */
+    list->s[list->n].tab_in = 0;
+    list->s[list->n].tab_out = 0;
     list->n++;
     v->p = NULL;
     v->n = v->cap = 0;

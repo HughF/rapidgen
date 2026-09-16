@@ -92,7 +92,7 @@ void rg_job_free(RgJob *j)
     j->nstrokes = 0;
 }
 
-bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
+bool rg_job_add_stroke_tabs(RgJob *j, const RgPt *pts, int n, int tab_in, int tab_out)
 {
     if (n < 1)
         return true;
@@ -106,8 +106,22 @@ bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
     memcpy(copy, pts, (size_t)n * sizeof *copy);
     s[j->nstrokes].pts = copy;
     s[j->nstrokes].n = n;
+    /* Tabs that overlap, or leave no work between them, are not tabs. */
+    if (tab_in < 0)
+        tab_in = 0;
+    if (tab_out < 0)
+        tab_out = 0;
+    if (tab_in + tab_out >= n)
+        tab_in = tab_out = 0;
+    s[j->nstrokes].tab_in = tab_in;
+    s[j->nstrokes].tab_out = tab_out;
     j->nstrokes++;
     return true;
+}
+
+bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
+{
+    return rg_job_add_stroke_tabs(j, pts, n, 0, 0);
 }
 
 void rg_job_delete_stroke(RgJob *j, int index)
@@ -126,7 +140,8 @@ bool rg_job_copy(RgJob *dst, const RgJob *src)
     dst->strokes = NULL;
     dst->nstrokes = 0;
     for (int i = 0; i < src->nstrokes; i++)
-        if (!rg_job_add_stroke(dst, src->strokes[i].pts, src->strokes[i].n)) {
+        if (!rg_job_add_stroke_tabs(dst, src->strokes[i].pts, src->strokes[i].n,
+                                    src->strokes[i].tab_in, src->strokes[i].tab_out)) {
             rg_job_free(dst);
             return false;
         }
@@ -175,7 +190,10 @@ static const char G_PROC[]  = "the process";
 static const char G_GUN[]   = "the gun";
 static const char G_PROG[]  = "around the program";
 static const char G_RULES[] = "rules the plan must keep";
-static const char G_PAINT[] = "the painted strokes, in order: x y pairs in drawing mm";
+static const char G_PAINT[] = "the painted strokes, in order: x y pairs in drawing mm.\n"
+                              "# Bars mark the tabs, which are sprayed but not on the part:\n"
+                              "#   stroke = -20 40 | 40 40  460 40 | 520 40\n"
+                              "#            lead-in |    work     | run-out";
 
 static const Key keys[] = {
     { "name",            K_IDENT,  F(name),            S(name),         0, 0, G_WHAT },
@@ -463,34 +481,87 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
         return true;
 
     case K_STROKE: {
-        int n;
-        double *all = numbers_all(v, &n);
-        if (n < 0) {
-            snprintf(why, whycap, "expected numbers: x y pairs");
+        /*
+         * Up to three sections, lead-in | work | run-out. The robot does not
+         * switch the torch, so the tabs are where the gun comes onto the work
+         * and where it leaves. A line with no bars is all work, and the plan
+         * extends it by `lead` itself.
+         */
+        size_t vlen = strlen(v);
+        char *buf = malloc(vlen + 1);
+        if (!buf) {
+            snprintf(why, whycap, "out of memory");
             return false;
         }
-        if (n < 4 || n % 2) {
-            free(all);
-            snprintf(why, whycap, "expected x y pairs, at least two points");
-            return false;
-        }
-        RgPt *pts = malloc((size_t)(n / 2) * sizeof *pts);
-        bool ok = pts != NULL;
-        for (int i = 0; ok && i < n / 2; i++) {
-            pts[i].x = all[2 * i];
-            pts[i].y = all[2 * i + 1];
-            if (!in_range(k, pts[i].x) || !in_range(k, pts[i].y)) {
-                snprintf(why, whycap, "point %d is outside %g to %g", i + 1, k->lo, k->hi);
-                free(pts);
-                free(all);
+        memcpy(buf, v, vlen + 1);
+
+        char *sect[3] = { buf, NULL, NULL };
+        int nsect = 1;
+        for (char *q = buf; *q; q++) {
+            if (*q != '|')
+                continue;
+            if (nsect == 3) {
+                free(buf);
+                snprintf(why, whycap, "a stroke takes at most two bars: "
+                                      "lead-in | work | run-out");
                 return false;
             }
+            *q = '\0';
+            sect[nsect++] = q + 1;
         }
-        ok = ok && rg_job_add_stroke(j, pts, n / 2);
-        free(pts);
-        free(all);
-        if (!ok)
+        if (nsect == 2) {
+            free(buf);
+            snprintf(why, whycap, "a stroke with a tab needs both bars: "
+                                  "lead-in | work | run-out, either end may be empty");
+            return false;
+        }
+
+        int count[3] = { 0, 0, 0 };
+        double *part[3] = { NULL, NULL, NULL };
+        bool ok = true;
+        for (int i = 0; ok && i < nsect; i++) {
+            part[i] = numbers_all(sect[i], &count[i]);
+            if (count[i] < 0) {
+                snprintf(why, whycap, "expected numbers: x y pairs");
+                ok = false;
+            } else if (count[i] % 2) {
+                snprintf(why, whycap, "expected x y pairs%s",
+                         nsect == 3 ? ", in every section" : "");
+                ok = false;
+            }
+        }
+        int n = ok ? count[0] + count[1] + count[2] : 0;
+        if (ok && (n < 4 || n % 2)) {
+            snprintf(why, whycap, "expected x y pairs, at least two points");
+            ok = false;
+        }
+        RgPt *pts = ok ? malloc((size_t)(n / 2) * sizeof *pts) : NULL;
+        if (ok && !pts) {
             snprintf(why, whycap, "out of memory");
+            ok = false;
+        }
+        for (int i = 0, at = 0; ok && i < nsect; i++)
+            for (int p = 0; ok && p < count[i] / 2; p++, at++) {
+                pts[at].x = part[i][2 * p];
+                pts[at].y = part[i][2 * p + 1];
+                if (!in_range(k, pts[at].x) || !in_range(k, pts[at].y)) {
+                    snprintf(why, whycap, "point %d is outside %g to %g", at + 1, k->lo, k->hi);
+                    ok = false;
+                }
+            }
+        if (ok) {
+            /* With no bars the one section is the work, not a tab. */
+            int tab_in = nsect == 3 ? count[0] / 2 : 0;
+            int tab_out = nsect == 3 ? count[2] / 2 : 0;
+            ok = rg_job_add_stroke_tabs(j, pts, n / 2, tab_in, tab_out);
+            if (!ok)
+                snprintf(why, whycap, "out of memory");
+        }
+        free(pts);
+        free(part[0]);
+        free(part[1]);
+        free(part[2]);
+        free(buf);
         return ok;
     }
     }
@@ -645,12 +716,20 @@ static void write_key(RgBuf *b, const RgJob *j, const Key *k)
         return;
     case K_STROKE:
         for (int i = 0; i < j->nstrokes; i++) {
+            const RgStroke *st = &j->strokes[i];
+            bool tabs = st->tab_in > 0 || st->tab_out > 0;
             rg_buf_printf(b, "%-15s =", k->key);
-            for (int p = 0; p < j->strokes[i].n; p++) {
+            for (int p = 0; p < st->n; p++) {
                 char x[32], y[32];
-                rg_buf_printf(b, "  %s %s", rg_fmt(x, sizeof x, j->strokes[i].pts[p].x, 3),
-                              rg_fmt(y, sizeof y, j->strokes[i].pts[p].y, 3));
+                /* lead-in | work | run-out, and always both bars when there
+                 * are tabs at all: the reader takes two or none. */
+                if (tabs && (p == st->tab_in || p == st->n - st->tab_out))
+                    rg_buf_puts(b, "  |");
+                rg_buf_printf(b, "  %s %s", rg_fmt(x, sizeof x, st->pts[p].x, 3),
+                              rg_fmt(y, sizeof y, st->pts[p].y, 3));
             }
+            if (tabs && st->tab_out == 0)
+                rg_buf_puts(b, "  |");
             rg_buf_puts(b, "\n");
         }
         return;
@@ -952,6 +1031,11 @@ const char *rg_job_template_flat(void)
 "#cool_signal = doCoolAir      # held on through the dwell between cycles\n"
 "\n"
 "# ---- the painted strokes, in order: x y pairs in drawing mm ----------------\n"
+"# Bars mark the tabs: the lead-in the gun comes on along, and the run-out it\n"
+"# leaves along. Both are sprayed - the robot does not switch the torch - but\n"
+"# neither is on the part. With no bars the whole stroke is work, and it is\n"
+"# extended by `lead` instead.\n"
+"#   stroke = -20 50 | 50 50  550 50 | 620 50\n"
 "stroke = 50 50  550 50  550 130  50 130\n"
 "stroke = 50 300  550 300\n";
 }

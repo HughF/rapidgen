@@ -229,7 +229,79 @@ static void test_flat(void)
     round_trip(rg_job_template_flat());
 }
 
+/*
+ * Tabs: the lead-in and run-out written as  lead-in | work | run-out.
+ * The robot does not switch the torch, so a stroke has to start and finish
+ * clear of the part, and the job file has to say where that is.
+ */
+static void test_tabs(void)
+{
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, "stroke = -20 50 | 50 50  550 50 | 620 50\n", err, sizeof err));
+    CHECK(j.nstrokes == 1);
+    if (j.nstrokes == 1) {
+        const RgStroke *st = &j.strokes[0];
+        CHECK(st->n == 4);
+        CHECK(st->tab_in == 1 && st->tab_out == 1);
+        /* the sections are concatenated in order, tabs included */
+        CHECK_NEAR(st->pts[0].x, -20, 1e-9);
+        CHECK_NEAR(st->pts[1].x, 50, 1e-9);
+        CHECK_NEAR(st->pts[3].x, 620, 1e-9);
+    }
+    rg_job_free(&j);
+
+    /* No bars at all: the one section is the WORK, not a giant lead-in. */
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, "stroke = 50 50  550 50\n", err, sizeof err));
+    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 0);
+    rg_job_free(&j);
+
+    /* Either end may be empty, so long as both bars are there. */
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, "stroke = | 50 50  550 50 | 620 50\n", err, sizeof err));
+    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 1);
+    rg_job_free(&j);
+
+    /* One bar is ambiguous, three is nonsense. */
+    rg_job_default(&j);
+    CHECK(!rg_job_parse(&j, "stroke = -20 50 | 50 50  550 50\n", err, sizeof err));
+    rg_job_free(&j);
+    rg_job_default(&j);
+    CHECK(!rg_job_parse(&j, "stroke = -20 50 | 50 50 | 550 50 | 620 50\n", err, sizeof err));
+    rg_job_free(&j);
+
+    /* Tabs that leave no work are not believed. */
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, "stroke = -20 50  0 50 | | 620 50  700 50\n", err, sizeof err));
+    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 0);
+    rg_job_free(&j);
+
+    /* And the bars survive being written back out. round_trip validates what
+     * it reads back, so this starts from a job that is actually complete. */
+    char text[8192];
+    snprintf(text, sizeof text, "%s\nstroke = -20 50 | 50 50  550 50 | 620 50\n",
+             rg_job_template_flat());
+    round_trip(text);
+
+    rg_job_default(&j);
+    RgBuf b;
+    rg_buf_init(&b);
+    CHECK(rg_job_parse(&j, "name = P1\npart = flat\n"
+                           "stroke = -20 50 | 50 50  550 50 | 620 50\n", err, sizeof err));
+    rg_job_write(&j, &b);
+    CHECK(strstr(b.s, "|") != NULL);
+    RgJob back;
+    rg_job_default(&back);
+    CHECK(rg_job_parse(&back, b.s, err, sizeof err));
+    CHECK(back.nstrokes == 1 && back.strokes[0].tab_in == 1 && back.strokes[0].tab_out == 1);
+    rg_buf_free(&b);
+    rg_job_free(&back);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_job",
+    test_tabs();
     test_template();
     test_errors();
     test_required();

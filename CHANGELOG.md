@@ -3,6 +3,25 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
+## [Unreleased]
+
+### Added
+
+- **Lead-in and run-out tabs on a stroke.** The robot does not switch the
+  torch, so a stroke has to come onto the work already spraying and leave it
+  still spraying. A stroke now records how many points at each end are tab —
+  travelled and sprayed, but not on the part — written in the job file with
+  bars:
+
+  ```
+  stroke = -20 50 | 50 50  550 50 | 620 50
+           lead-in |     work     | run-out
+  ```
+
+  A line with no bars is all work, as before, and is extended by `lead`
+  instead, so every job written until now still loads. A stroke with a tab
+  needs both bars; either end may be empty.
+
 ## [2026.09.16.3] — alpha, driving the path
 
 ### Added

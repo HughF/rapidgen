@@ -94,6 +94,19 @@ would collapse in on itself, and a region with a hole in it is refused rather
 than spiralled, because a ring would run straight across the hole. The zig-zag
 fill is still there for parts that suit it.
 
+Because the robot does not switch the torch, a stroke can carry **tabs**: a
+lead-in it comes onto the work along, and a run-out it leaves along. Both are
+sprayed, neither is on the part, and they are drawn rather than calculated, so
+the gun can be brought on where the part allows it. In the job file bars mark
+them:
+
+```
+stroke = -20 50 | 50 50  550 50 | 620 50
+         lead-in |     work     | run-out
+```
+
+A stroke with no tabs falls back to the automatic run-on and run-off below.
+
 Each open stroke is **run on and off**: extended past both ends by `lead` —
 by default far enough to reach spray speed and stop again, worked out from the
 speed and the acceleration — so the gun is never changing speed over the work.

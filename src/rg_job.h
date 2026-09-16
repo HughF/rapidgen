@@ -79,9 +79,20 @@ typedef enum { RG_GUN_CONTINUOUS = 0, RG_GUN_SWITCHED } RgGunKind;
 typedef struct { double y0, y1; } RgBand;
 
 /* A path the gun follows with the spray on, in drawing millimetres. */
+/*
+ * A painted stroke, and the tabs at its ends.
+ *
+ * The robot does not switch the torch, so a stroke has to come onto the work
+ * already spraying and leave it still spraying: the first `tab_in` points and
+ * the last `tab_out` points are the lead-in and the run-out, which are
+ * travelled and sprayed but are not on the part. The points between them are
+ * the work. Both zero means the whole stroke is work, and the plan falls back
+ * to extending it by `lead`.
+ */
 typedef struct {
     RgPt *pts;
     int   n;
+    int   tab_in, tab_out;
 } RgStroke;
 
 typedef struct {
@@ -171,6 +182,11 @@ bool rg_job_copy(RgJob *dst, const RgJob *src);
 
 /* Append a stroke (copied); false out of memory. */
 bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n);
+
+/* ...with its lead-in and run-out: the first `tab_in` and last `tab_out`
+ * points are off the work. Tabs that would overlap, or swallow the whole
+ * stroke, are dropped rather than believed. */
+bool rg_job_add_stroke_tabs(RgJob *j, const RgPt *pts, int n, int tab_in, int tab_out);
 void rg_job_delete_stroke(RgJob *j, int index);
 
 /* Parse a job file's text over a job (normally defaulted first). The error
