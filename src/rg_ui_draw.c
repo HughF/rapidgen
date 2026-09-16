@@ -24,7 +24,8 @@
  *   Select  pick a stroke; drag to pan, scroll to zoom
  *   Line    click points, snapping to the drawing's corners and lines
  *   Draw    freehand, thinned to what matters when the button is let go
- *   Trace   round an outline, inset by an amount
+ *   Trace   round an outline, inset by an amount; or, through a wizard, a
+ *           closed track covered by rings from outside it to past its inside
  *   Fill    the region clicked, previewed on hover: rings following the
  *           outline inward, or parallel passes across it
  *   Scale   two points a known distance apart set the drawing's scale
@@ -54,13 +55,24 @@ static const char *TOOL_TIP[TOOL_COUNT] = {
     "lines; hold Shift not to snap. Double-click or Enter to finish (L)",
     "Paint a stroke freehand. It is smoothed when you let go (D)",
     "Trace an outline: click near it, and the gun goes round once from that "
-    "point, inset by the amount set (T)",
+    "point, inset by the amount set. Cover a track opens a step-by-step guide "
+    "for a band between two edges (T)",
     "Fill a region: click inside an outline to cover it with passes a step-over "
     "apart, turning round off the work, or with rings following it inward. Hover to "
     "preview (F)",
     "Scale the drawing: click two points a known distance apart, then type the "
     "true distance (M)",
 };
+
+/* the track wizard, at the end of the file */
+static void track_close(RgUi *ui);
+static bool track_made_intact(const RgUi *ui);
+static void track_input(RgUi *ui, RgPt m, bool press, double per_px);
+static void track_paint_band(RgUi *ui, struct nk_command_buffer *cb);
+static void track_paint(RgUi *ui, struct nk_command_buffer *cb);
+static void track_update(RgUi *ui);
+static void inspect_track(RgUi *ui);
+static void track_open(RgUi *ui);
 
 static double dist(RgPt a, RgPt b)
 {
@@ -94,11 +106,14 @@ void draw_forget(RgUi *ui)
     ui->gen_loop = -1;
     ui->gen_count = 0;
     clear_preview(ui);
+    track_close(ui);
+    ui->trk_made_count = 0;
 }
 
 void draw_shutdown(RgUi *ui)
 {
     clear_preview(ui);
+    track_close(ui);
     free(ui->draft);
     free(ui->scratch);
     ui->draft = NULL;
@@ -669,6 +684,10 @@ static void update_fill_preview(RgUi *ui)
 static bool stroke_shown(const RgUi *ui, int s)
 {
     const RgJob *j = &ui->job;
+    /* the track wizard previews what it made, and what would replace it */
+    if (ui->trk_step > 0 && track_made_intact(ui) && s >= ui->trk_made_first &&
+        s < ui->trk_made_first + ui->trk_made_count)
+        return false;
     int c = j->strokes[s].cycle;
     if (c == 0)
         return true;
@@ -703,6 +722,7 @@ static void set_tool(RgUi *ui, Tool t)
         ui->ndraft = 0;
         ui->freehand = false;
         ui->scale_clicks = 0;
+        track_close(ui);
     }
     ui->tool = t;
 }
@@ -774,6 +794,11 @@ static void canvas_input(RgUi *ui, struct nk_rect r)
 
     bool press = nk_input_is_mouse_pressed(in, NK_BUTTON_LEFT);
     bool twice = nk_input_is_mouse_pressed(in, NK_BUTTON_DOUBLE);
+
+    if (ui->trk_step > 0) {
+        track_input(ui, m, press, per_px);
+        return;
+    }
 
     switch (ui->tool) {
     case TOOL_PAN:
@@ -858,6 +883,7 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
     for (int s = 0; s < ui->job.nstrokes; s++)
         if (stroke_shown(ui, s))
             draw_stroke_band(ui, cb, &ui->job.strokes[s], s == ui->selected);
+    track_paint_band(ui, cb);
 
     if (ui->have_raw) {
         for (int i = 0; i < ui->drawing.n; i++)
@@ -869,7 +895,7 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
         }
     }
 
-    if (ui->tool == TOOL_TRACE && ui->hover_loop >= 0 && painting(ui)) {
+    if (ui->tool == TOOL_TRACE && ui->trk_step == 0 && ui->hover_loop >= 0 && painting(ui)) {
         RgPt *pts;
         int n;
         if (rg_pattern_trace(&ui->shape.loops[ui->hover_loop], ui->mouse_mm, ui->inset, &pts, &n)) {
@@ -884,6 +910,7 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
     }
     for (int i = 0; i < ui->npreview; i++)
         draw_path(ui, cb, &ui->preview[i], S(ui, 1.3f), alpha(t->trace_a, 150), false);
+    track_paint(ui, cb);
 
     for (int s = 0; s < ui->job.nstrokes; s++)
         if (stroke_shown(ui, s))
@@ -1101,6 +1128,12 @@ static void inspect_tool(RgUi *ui)
                       "goes round once, and clicking it again replaces that path. A large "
                       "inset on a tight shape can cross itself: check the preview.",
                       t->text_dim);
+        ui_gap(ui, 4);
+        button_row(ui, 1);
+        if (button(ui, "Cover a track...", "Cover a closed track - a band between two edges, like a "
+                   "seal face - with passes driven round it from outside the outer edge to past "
+                   "the inner one, a step at a time", painting(ui) && ui->have_raw))
+            track_open(ui);
         break;
     }
     case TOOL_FILL: {
@@ -1332,6 +1365,506 @@ static void inspect_spray(RgUi *ui)
 }
 
 /* ------------------------------------------------------------------ */
+/* Track wizard                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A closed track - a seal face, a band between two edges - covered by rings
+ * driven round it: the first pass outside the outer edge, the last past the
+ * inner, the gun drifting from ring to ring. Three steps: the outer edge, the
+ * inner edge or the track's width, then the passes and where the gun steps
+ * across. The wizard sits in the inspector rather than a dialog, because the
+ * edges are picked on the canvas beside it.
+ */
+
+#define TRACK_SEAMS 8     /* seams a set follows the cycles up to */
+
+static void track_close(RgUi *ui)
+{
+    rg_strokes_free(ui->trk_preview, ui->trk_npreview > 0 ? ui->trk_npreview : 0);
+    ui->trk_preview = NULL;
+    ui->trk_npreview = ui->trk_result = 0;
+    ui->trk_step = 0;
+}
+
+/* Whether what the wizard's last Create added is still in the job as it was. */
+static bool track_made_intact(const RgUi *ui)
+{
+    const RgJob *j = &ui->job;
+    int first = ui->trk_made_first, count = ui->trk_made_count;
+    if (count <= 0 || first < 0 || first + count > j->nstrokes)
+        return false;
+    const RgStroke *st = &j->strokes[first];
+    return st->n == ui->trk_made_n && dist(st->pts[0], ui->trk_made_p0) <= 1e-9;
+}
+
+static void track_open(RgUi *ui)
+{
+    double w = spray_width(ui) > 0.0 ? spray_width(ui) : 10.0;
+    if (!ui->trk_inited) {
+        ui->trk_inited = true;
+        ui->trk_outer = ui->trk_inner = -1;
+        ui->trk_first_out = ui->trk_last_past = 0.5 * w;
+        ui->trk_drift = 2.5 * w;
+        ui->trk_lead_auto = true;
+        ui->trk_seed = (unsigned)SDL_GetTicks() * 2654435761u | 1u;
+    }
+    /* A different drawing or scale since: the edges picked mean nothing now. */
+    if (ui->trk_scale != ui->job.drawing_scale || ui->trk_outer >= ui->shape.n ||
+        ui->trk_inner >= ui->shape.n) {
+        ui->trk_outer = ui->trk_inner = -1;
+        ui->trk_made_count = 0;
+    }
+    ui->trk_scale = ui->job.drawing_scale;
+    memset(ui->trk_key, 0, sizeof ui->trk_key);
+    ui->trk_key[0] = NAN;                         /* never equal: build the preview */
+    ui->trk_step = ui->trk_outer < 0 ? 1 : ui->trk_by_width || ui->trk_inner >= 0 ? 3 : 2;
+    ui->selected = -1;
+}
+
+static int track_seam_count(const RgUi *ui)
+{
+    if (ui->trk_seams > 0)
+        return ui->trk_seams;
+    return ui->job.cycles < TRACK_SEAMS ? (ui->job.cycles > 1 ? ui->job.cycles : 1) : TRACK_SEAMS;
+}
+
+static double track_lead(RgUi *ui)
+{
+    if (ui->trk_lead_auto)
+        ui->trk_lead = turn_length(ui);
+    return ui->trk_lead;
+}
+
+/* A loop's highest or lowest point, where its label goes. */
+static RgPt loop_extreme(const RgLoop *l, bool top)
+{
+    RgPt e = l->pts[0];
+    for (int k = 1; k < l->n; k++)
+        if (top ? l->pts[k].y > e.y : l->pts[k].y < e.y)
+            e = l->pts[k];
+    return e;
+}
+
+static void track_input(RgUi *ui, RgPt m, bool press, double per_px)
+{
+    if (!ui->have_raw || !painting(ui))
+        return;
+    double reach = S(ui, PICK_PX) * 1.5 * per_px;
+    RgShape *sh = &ui->shape;
+    ui->trk_seam_near = false;
+
+    switch (ui->trk_step) {
+    case 1:
+        ui->hover_loop = rg_shape_loop_near(sh, m, reach, NULL);
+        if (press && ui->hover_loop >= 0) {
+            RgPt on;
+            rg_loop_nearest(&sh->loops[ui->hover_loop], m, &on);
+            if (ui->trk_inner == ui->hover_loop)
+                ui->trk_inner = -1;
+            ui->trk_outer = ui->hover_loop;
+            ui->trk_seam = on;
+            ui->trk_made_count = 0;
+            ui->trk_step = ui->trk_by_width || ui->trk_inner >= 0 ? 3 : 2;
+        }
+        break;
+    case 2: {
+        if (ui->trk_by_width)
+            break;
+        int l = rg_shape_loop_near(sh, m, reach, NULL);
+        ui->hover_loop = l == ui->trk_outer ? -1 : l;
+        if (!press || l < 0)
+            break;
+        if (l == ui->trk_outer) {
+            ui_message(ui, true, "That is the outer edge: click the track's inner edge.");
+            break;
+        }
+        const RgLoop *outer = &sh->loops[ui->trk_outer], *picked = &sh->loops[l];
+        if (rg_loop_contains(picked, outer->pts[0]) &&
+            fabs(rg_loop_area(picked)) > fabs(rg_loop_area(outer))) {
+            /* The edges were picked the wrong way round: that one is outside. */
+            ui->trk_inner = ui->trk_outer;
+            ui->trk_outer = l;
+            rg_loop_nearest(picked, ui->trk_seam, &ui->trk_seam);
+            ui_message(ui, false, "That edge is outside the first one, so it is taken as the "
+                                  "outer edge.");
+        } else {
+            ui->trk_inner = l;
+        }
+        ui->trk_made_count = 0;
+        ui->trk_step = 3;
+        break;
+    }
+    case 3:
+        if (ui->trk_random || ui->trk_outer < 0)
+            break;
+        /* the same place every cycle: a click near the track moves it */
+        if (rg_loop_nearest(&sh->loops[ui->trk_outer], m, &ui->trk_seam_at) <= 4.0 * reach) {
+            ui->trk_seam_near = true;
+            if (press)
+                ui->trk_seam = ui->trk_seam_at;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void track_update(RgUi *ui)
+{
+    if (ui->trk_step == 0)
+        return;
+    if (ui->trk_step < 2 || ui->trk_outer < 0 || !painting(ui) ||
+        (ui->trk_step == 2 && !ui->trk_by_width && ui->trk_inner < 0)) {
+        rg_strokes_free(ui->trk_preview, ui->trk_npreview);
+        ui->trk_preview = NULL;
+        ui->trk_npreview = ui->trk_result = 0;
+        memset(&ui->trk_info, 0, sizeof ui->trk_info);
+        ui->trk_key[0] = NAN;
+        return;
+    }
+    if (ui->job.drawing_scale != ui->trk_scale || ui->trk_outer >= ui->shape.n ||
+        ui->trk_inner >= ui->shape.n) {
+        ui->trk_outer = ui->trk_inner = -1;
+        ui->trk_step = 1;
+        return;
+    }
+    RgRingOpts o = {
+        ui->trk_outer, ui->trk_by_width ? -1 : ui->trk_inner, ui->trk_width,
+        ui->trk_first_out, ui->trk_last_past, fill_pitch(ui), ui->trk_drift, track_lead(ui),
+        ui->trk_seam
+    };
+    int seams = ui->trk_random ? track_seam_count(ui) : 1;
+    double key[16] = { o.outer, o.inner, o.width, o.first_out, o.last_past, o.step, o.drift,
+                       o.lead, ui->trk_random ? 0.0 : o.seam.x, ui->trk_random ? 0.0 : o.seam.y,
+                       ui->trk_random, seams, ui->trk_seed, ui->shape.n, ui->trk_scale, 0 };
+    if (memcmp(key, ui->trk_key, sizeof key) == 0)
+        return;
+    memcpy(ui->trk_key, key, sizeof key);
+    rg_strokes_free(ui->trk_preview, ui->trk_npreview);
+    ui->trk_preview = NULL;
+    ui->trk_npreview = 0;
+    if (ui->trk_random)
+        ui->trk_result = rg_pattern_ring_seams(&ui->shape, &o, seams, ui->trk_seed,
+                                               &ui->trk_preview, &ui->trk_info);
+    else
+        ui->trk_result = rg_pattern_rings(&ui->shape, &o, &ui->trk_preview, &ui->trk_info);
+    ui->trk_npreview = ui->trk_result > 0 ? ui->trk_result : 0;
+    if (ui->trk_show >= ui->trk_npreview)
+        ui->trk_show = 0;
+}
+
+static const RgStroke *track_shown(const RgUi *ui)
+{
+    return ui->trk_step >= 2 && ui->trk_npreview > 0 ? &ui->trk_preview[ui->trk_show] : NULL;
+}
+
+static void track_paint_band(RgUi *ui, struct nk_command_buffer *cb)
+{
+    const RgStroke *st = track_shown(ui);
+    if (st)
+        draw_stroke_band(ui, cb, st, false);
+}
+
+/* The outer edge is labelled below, clear of a seam clicked at its top. */
+static void edge_label(RgUi *ui, struct nk_command_buffer *cb, int loop, const char *what,
+                       bool above, struct nk_color col)
+{
+    const RgLoop *l = &ui->shape.loops[loop];
+    polyline(ui, cb, l->pts, l->n, true, S(ui, 3.0f), col);
+    RgPt e = loop_extreme(l, above);
+    text_at(ui, cb, to_sx(ui, e.x), to_sy(ui, e.y) + S(ui, above ? -12 : 14), what, col, 0);
+}
+
+static void track_paint(RgUi *ui, struct nk_command_buffer *cb)
+{
+    const RgTheme *t = ui->theme;
+    if (ui->trk_step == 0 || !ui->have_raw)
+        return;
+    if (ui->trk_outer >= 0 && ui->trk_outer < ui->shape.n)
+        edge_label(ui, cb, ui->trk_outer, "outer edge", false, t->accent);
+    if (!ui->trk_by_width && ui->trk_step >= 2 && ui->trk_inner >= 0 && ui->trk_inner < ui->shape.n)
+        edge_label(ui, cb, ui->trk_inner, "inner edge", true, t->trace_c);
+
+    const RgStroke *st = track_shown(ui);
+    if (st)
+        draw_path(ui, cb, st, S(ui, 1.6f), t->trace_a, true);
+    /* where each cycle's gun comes onto the first pass */
+    for (int i = 0; i < ui->trk_npreview; i++) {
+        const RgStroke *v = &ui->trk_preview[i];
+        if (v->n < 2)
+            continue;
+        RgPt at = v->pts[v->off && v->off[0] ? 1 : 0];
+        bool shown = v == st;
+        dot(cb, to_sx(ui, at.x), to_sy(ui, at.y), S(ui, shown ? 6.0f : 4.0f), t->trace_d);
+        if (ui->trk_npreview > 1) {
+            char num[16];
+            snprintf(num, sizeof num, "%d", v->cycle);
+            text_at(ui, cb, to_sx(ui, at.x) + S(ui, 8), to_sy(ui, at.y) - S(ui, 10), num,
+                    t->trace_d, -1);
+        }
+    }
+    if (st && st->n >= 2) {
+        RgPt a = st->pts[0];
+        text_at(ui, cb, to_sx(ui, a.x), to_sy(ui, a.y) + S(ui, 12), "on", t->text_dim, 0);
+        RgPt b = st->pts[st->n - 1];
+        text_at(ui, cb, to_sx(ui, b.x), to_sy(ui, b.y) + S(ui, 12), "off", t->text_dim, 0);
+    }
+    if (ui->trk_seam_near && ui->mouse_in) {
+        float x = to_sx(ui, ui->trk_seam_at.x), y = to_sy(ui, ui->trk_seam_at.y), h = S(ui, 7);
+        nk_stroke_circle(cb, nk_rect(x - h, y - h, 2 * h, 2 * h), S(ui, 1.6f), t->trace_d);
+    }
+}
+
+/* Take away what the wizard's last Create added, if it is still there as it
+ * was: Undo may have taken it already. */
+static void track_drop_made(RgUi *ui)
+{
+    if (!track_made_intact(ui))
+        return;
+    for (int i = ui->trk_made_count - 1; i >= 0; i--)
+        rg_job_delete_stroke(&ui->job, ui->trk_made_first + i);
+    ui->trk_made_count = 0;
+}
+
+static void track_create(RgUi *ui)
+{
+    RgJob *j = &ui->job;
+    if (ui->trk_npreview <= 0)
+        return;
+    bool again = track_made_intact(ui);
+    track_drop_made(ui);
+    /* A job holds one set of seams that move, sprayed one a cycle. */
+    int replaced = 0;
+    if (ui->trk_random)
+        for (int i = j->nstrokes - 1; i >= 0; i--)
+            if (j->strokes[i].cycle > 0) {
+                rg_job_delete_stroke(j, i);
+                replaced++;
+            }
+    int before = j->nstrokes;
+    for (int i = 0; i < ui->trk_npreview; i++) {
+        const RgStroke *v = &ui->trk_preview[i];
+        if (!rg_job_add_stroke_off(j, v->pts, v->n, v->off)) {
+            while (j->nstrokes > before)
+                rg_job_delete_stroke(j, j->nstrokes - 1);
+            ui->trk_made_count = 0;
+            ui_message(ui, true, "Out of memory.");
+            return;
+        }
+        j->strokes[j->nstrokes - 1].cycle = v->cycle;
+    }
+    ui->trk_made_first = before;
+    ui->trk_made_count = ui->trk_npreview;
+    ui->trk_made_n = j->strokes[before].n;
+    ui->trk_made_p0 = j->strokes[before].pts[0];
+    ui->selected = before + ui->trk_show;
+
+    const char *how = again ? "Replaced the track's path" : "Covered the track";
+    if (ui->trk_random)
+        ui_message(ui, false, "%s: %d passes, stepping across at %d places, one a cycle%s", how,
+                   ui->trk_info.rings, ui->trk_npreview, replaced
+                   ? ". The job's other moving seams were replaced: a job holds one set" : "");
+    else
+        ui_message(ui, false, "%s: %d passes, as stroke %d", how, ui->trk_info.rings, before + 1);
+}
+
+static void track_title(RgUi *ui, int step, const char *what)
+{
+    char buf[96];
+    ui_section(ui, "Cover a track");
+    snprintf(buf, sizeof buf, "Step %d of 3: %s", step, what);
+    nk_layout_row_dynamic(ui->ctx, S(ui, 24), 1);
+    nk_label_colored(ui->ctx, buf, NK_TEXT_LEFT, ui->theme->accent);
+}
+
+/* Two mutually exclusive choices side by side; true when one was picked. */
+static bool choice(RgUi *ui, bool *second, const char *a, const char *tip_a, const char *b,
+                   const char *tip_b)
+{
+    bool was = *second;
+    button_row(ui, 2);
+    nk_bool on = !*second;
+    ui_tip(ui, tip_a);
+    if (nk_selectable_label(ui->ctx, a, NK_TEXT_CENTERED, &on) && on)
+        *second = false;
+    on = *second;
+    ui_tip(ui, tip_b);
+    if (nk_selectable_label(ui->ctx, b, NK_TEXT_CENTERED, &on) && on)
+        *second = true;
+    return was != *second;
+}
+
+static void loop_row(RgUi *ui, const char *k, int loop)
+{
+    if (loop < 0 || loop >= ui->shape.n) {
+        ui_info_row(ui, k, "not picked");
+        return;
+    }
+    const RgLoop *l = &ui->shape.loops[loop];
+    ui_info_rowf(ui, k, "%.0f mm round", rg_stroke_length(l->pts, l->n) +
+                 dist(l->pts[l->n - 1], l->pts[0]));
+}
+
+static void inspect_track(RgUi *ui)
+{
+    struct nk_context *c = ui->ctx;
+    const RgTheme *t = ui->theme;
+    RgJob *j = &ui->job;
+
+    if (!ui->have_raw || !painting(ui)) {
+        track_close(ui);
+        return;
+    }
+
+    switch (ui->trk_step) {
+    case 1:
+        track_title(ui, 1, "the outer edge");
+        ui_label_wrap(ui, "Click the track's outer edge on the drawing. The first pass runs "
+                      "round outside it, and the gun steps from pass to pass near where you "
+                      "click.", t->text_dim);
+        loop_row(ui, "Outer edge", ui->trk_outer);
+        ui_gap(ui, 6);
+        button_row(ui, 2);
+        if (button(ui, "Cancel", "Close the wizard without changing the pattern (Escape)", true))
+            track_close(ui);
+        if (button(ui, "Next", "On to the inner edge", ui->trk_outer >= 0))
+            ui->trk_step = ui->trk_by_width || ui->trk_inner >= 0 ? 3 : 2;
+        return;
+
+    case 2:
+        track_title(ui, 2, "the inner edge");
+        choice(ui, &ui->trk_by_width,
+               "Click it", "Pick the track's inner edge on the drawing. Each pass then follows "
+               "whichever edge is nearer, so a track that narrows is followed on both sides",
+               "Type the width", "Give the track's width instead: every pass follows the outer "
+               "edge, and the inner edge is taken to be this far in from it");
+        if (ui->trk_by_width) {
+            ui_prop(ui, "Track width", "Outer edge to inner edge, square across the track",
+                    &ui->trk_width, 0, 10000, 0.5, "mm");
+            ui_label_wrap(ui, "Every pass follows the outer edge, this far in from it.",
+                          t->text_dim);
+        } else {
+            ui_label_wrap(ui, "Click the track's inner edge on the drawing.", t->text_dim);
+            loop_row(ui, "Inner edge", ui->trk_inner);
+        }
+        loop_row(ui, "Outer edge", ui->trk_outer);
+        ui_gap(ui, 6);
+        button_row(ui, 2);
+        if (button(ui, "Back", "Pick the outer edge again", true))
+            ui->trk_step = 1;
+        if (button(ui, "Next", "On to the passes and the seam",
+                   ui->trk_by_width ? ui->trk_width > 0.0 : ui->trk_inner >= 0))
+            ui->trk_step = 3;
+        return;
+
+    default:
+        break;
+    }
+
+    track_title(ui, 3, "the passes");
+    RgRingInfo *info = &ui->trk_info;
+    if (info->rings > 0) {
+        if (ui->trk_by_width || info->width_max - info->width_min < 0.05 * info->width)
+            ui_info_rowf(ui, "Track", "%.1f mm wide", info->width);
+        else
+            ui_info_rowf(ui, "Track", "%.1f mm, %.1f\xe2\x80\x93%.1f", info->width,
+                         info->width_min, info->width_max);
+    }
+    ui_prop(ui, "First pass out", "How far outside the outer edge the first pass runs. Half the "
+            "spot puts the edge of the spray on the edge of the track", &ui->trk_first_out, 0,
+            1000, 0.5, "mm");
+    ui_prop(ui, "Last pass past", "How far past the inner edge, into the middle, the last pass "
+            "runs", &ui->trk_last_past, 0, 1000, 0.5, "mm");
+    double step = rg_job_step(j);
+    if (!isnan(step) && ui_prop(ui, "Step-over", "The passes are spaced evenly, no further apart "
+                                "than this. It is the job's step-over", &step, 0.1, 1000, 0.5, "mm"))
+        j->step_over = step;
+    ui_prop(ui, "Drift", "The distance along the track over which the gun moves across from one "
+            "pass to the next, rather than jumping, so the step is spread out", &ui->trk_drift, 0,
+            10000, 1, "mm");
+    if (ui_prop(ui, "Lead", "How far the gun runs on before it reaches the first pass and after "
+                "it leaves the last, off the work. Follows the gun's stopping distance until you "
+                "change it", &ui->trk_lead, 0, 10000, 1, "mm"))
+        ui->trk_lead_auto = false;
+    if (!ui->trk_lead_auto) {
+        button_row(ui, 2);
+        nk_skip(c);
+        if (button(ui, "Follow the gun", "Set the lead to 5 x the spot, or the gun's stopping "
+                   "distance if that is more, and keep it there", true))
+            ui->trk_lead_auto = true;
+    }
+
+    ui_gap(ui, 4);
+    ui_section(ui, "Seam");
+    if (choice(ui, &ui->trk_random,
+               "Same place", "Step across at the same place every cycle, near the point marked. "
+               "Click near the track to move it",
+               "New place each cycle", "Step across somewhere else each cycle, so no one place "
+               "takes every cycle's step. The places are random, but spread round the track"))
+        ui->trk_show = 0;
+    if (ui->trk_random) {
+        int seams = track_seam_count(ui);
+        if (ui_prop_int(ui, "Seams", "How many places to step across at, one a cycle, over and "
+                        "over. Each is a copy of the whole path in the program, so more makes "
+                        "it bigger", &seams, 1, 99, ""))
+            ui->trk_seams = seams;
+        ui_prop_int(ui, "Cycles", "Repeats of the whole pattern. It is the job's cycles",
+                    &j->cycles, 1, 999, "");
+        if (seams > j->cycles)
+            ui_label_wrap(ui, "There are more seams than cycles: the extra ones are never "
+                          "sprayed.", t->warn);
+        button_row(ui, 3);
+        if (button(ui, "<", "Show the previous cycle's path", ui->trk_npreview > 1))
+            ui->trk_show = (ui->trk_show + ui->trk_npreview - 1) % ui->trk_npreview;
+        if (button(ui, ">", "Show the next cycle's path", ui->trk_npreview > 1))
+            ui->trk_show = (ui->trk_show + 1) % ui->trk_npreview;
+        if (button(ui, "Shuffle", "Pick other random places", true))
+            ui->trk_seed = ui->trk_seed * 1664525u + 1013904223u;
+        if (ui->trk_npreview > 1)
+            ui_info_rowf(ui, "Showing", "cycle %d's path", ui->trk_show + 1);
+    } else {
+        ui_label_wrap(ui, "Click near the track to move where the gun steps across.",
+                      t->text_dim);
+    }
+
+    ui_gap(ui, 4);
+    const RgStroke *st = track_shown(ui);
+    if (ui->trk_result > 0 && st) {
+        ui_info_rowf(ui, "Passes", "%d, %.2f mm apart", info->rings, info->spacing);
+        double len = rg_stroke_length(st->pts, st->n);
+        if (j->spray_speed > 0.0)
+            ui_info_rowf(ui, "Path", "%.0f mm, %.1f s a cycle", len, len / j->spray_speed);
+        else
+            ui_info_rowf(ui, "Path", "%.0f mm a cycle", len);
+        if (!ui->trk_random && rg_stroke_off_crosses_work(st))
+            ui_label_wrap(ui, "Here the lead-in or run-out crosses the passes, spraying across "
+                          "the track: move the seam, or shorten the lead.", t->warn);
+    } else if (ui->trk_result < 0) {
+        ui_label_wrap(ui, "Out of memory.", t->alarm);
+    } else {
+        char why[240];
+        snprintf(why, sizeof why, "No path: %s.", info->why[0] ? info->why : "check the settings");
+        ui_label_wrap(ui, why, t->alarm);
+    }
+    bool made = track_made_intact(ui);
+    if (made)
+        ui_label_wrap(ui, "Created. Change anything and Replace swaps it for the new path.",
+                      t->text_dim);
+
+    ui_gap(ui, 6);
+    button_row(ui, 3);
+    if (button(ui, "Back", "Pick the inner edge again", true))
+        ui->trk_step = 2;
+    if (button(ui, made ? "Replace" : "Create",
+               "Add this path to the pattern: a set of paths, one a cycle, when the seam moves",
+               ui->trk_result > 0))
+        track_create(ui);
+    if (button(ui, made ? "Done" : "Cancel", "Close the wizard (Escape)", true))
+        track_close(ui);
+}
+
+/* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1371,16 +1904,21 @@ void page_draw(RgUi *ui, struct nk_rect inner)
         fit_view(ui);
     canvas_input(ui, r);
     update_fill_preview(ui);
+    track_update(ui);
     canvas_paint(ui, r);
 
     nk_style_push_style_item(c, &c->style.window.fixed_background, nk_style_item_color(t->panel));
     nk_style_push_vec2(c, &c->style.window.group_padding, nk_vec2(S(ui, 12), S(ui, 10)));
     if (nk_group_begin(c, "inspector", 0)) {
         nk_style_push_vec2(c, &c->style.window.spacing, nk_vec2(S(ui, 8), S(ui, 6)));
-        inspect_drawing(ui);
-        inspect_tool(ui);
-        inspect_strokes(ui);
-        inspect_spray(ui);
+        if (ui->trk_step > 0) {
+            inspect_track(ui);
+        } else {
+            inspect_drawing(ui);
+            inspect_tool(ui);
+            inspect_strokes(ui);
+            inspect_spray(ui);
+        }
         nk_style_pop_vec2(c);
         nk_group_end(c);
     }
@@ -1402,6 +1940,10 @@ bool draw_handle_key(RgUi *ui, SDL_Keycode key, Uint16 mod)
         }
         return false;
     case SDLK_ESCAPE:
+        if (ui->trk_step > 0) {
+            track_close(ui);
+            return true;
+        }
         if (ui->ndraft || ui->scale_clicks) {
             ui->ndraft = 0;
             ui->freehand = false;

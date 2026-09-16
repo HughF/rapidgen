@@ -153,6 +153,25 @@ struct RgUi {
     int       gen_loop, gen_tool, gen_first, gen_count, gen_n;
     RgPt      gen_p0;
 
+    /* The track wizard: a closed track covered with rings, a step at a time.
+     * Step 1 picks the outer edge, 2 the inner edge or a width, 3 the passes
+     * and the seam. The canvas stays live beside it, for the picking. */
+    int       trk_step;            /* 0: closed                              */
+    bool      trk_inited;
+    int       trk_outer, trk_inner;
+    bool      trk_by_width, trk_random, trk_lead_auto, trk_seam_near;
+    double    trk_width, trk_first_out, trk_last_past, trk_drift, trk_lead;
+    int       trk_seams;           /* 0: follow the cycles, up to TRACK_SEAMS */
+    unsigned  trk_seed;
+    RgPt      trk_seam, trk_seam_at;
+    double    trk_scale;           /* the drawing scale the edges were picked at */
+    RgStroke *trk_preview;
+    int       trk_npreview, trk_result, trk_show;
+    RgRingInfo trk_info;
+    double    trk_key[16];
+    int       trk_made_first, trk_made_count, trk_made_n;   /* what Create added */
+    RgPt      trk_made_p0;
+
     float    *scratch;             /* screen points for one polyline */
     int       scratch_cap;
 
