@@ -133,6 +133,7 @@ struct RgUi {
     bool     snap;
     double   smoothing, inset, fill_angle;
     bool     fill_extend, fill_spiral;
+    bool     inset_half;           /* trace: keep the inset at half the spot */
     int      scale_clicks;
     RgPt     scale_a, scale_b;
     double   scale_true, width_true;
@@ -145,6 +146,12 @@ struct RgUi {
     RgStroke *preview;
     int       npreview, preview_loop;
     double    preview_key[5];   /* pitch, angle, extend, scale, spiral */
+
+    /* What Fill or Trace last made, so clicking a region again replaces its
+     * path instead of laying another on top. Checked against the job before
+     * anything is removed: Delete, Clear all and Undo can all have moved it. */
+    int       gen_loop, gen_tool, gen_first, gen_count, gen_n;
+    RgPt      gen_p0;
 
     float    *scratch;             /* screen points for one polyline */
     int       scratch_cap;

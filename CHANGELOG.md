@@ -35,6 +35,25 @@ a second release on the same day.
   has no rotator.
 - The report's *Run on/off* line was printed even when every stroke was
   closed and therefore had no run-on at all.
+- **Clicking a region again piled another path on top of the last one.**
+  Fill and Trace now replace the path that region produced, so re-clicking
+  after changing the spot or the step-over refines it instead of stacking
+  overlapping copies. What was generated is checked against the job before
+  anything is removed, so Delete, Clear all and Undo cannot make it drop
+  somebody else's stroke.
+- **"Half the width" would not stay put.** It set the inset once and forgot,
+  so it could never show as on, and changing the spot afterwards left the old
+  figure behind. It latches now and holds the inset at half the spot until
+  the inset is set by hand or *On the line* is pressed.
+- **Overlapping passes drew as stacked boxes.** The band showing what the
+  spray covers was filled once per segment and translucent, so every overlap
+  darkened the one under it — with passes a step-over apart, a spiral came
+  out as a heap of rectangles instead of one coated area. The colour is
+  blended against the canvas once and filled opaque, so the passes merge;
+  the coating is drawn under the drawing, which keeps the outline visible
+  through it.
+- The Trace tool's preview measured its band with `fan_width`, which a
+  round spot does not have, so no band was previewed at all.
 
 ## [2026.09.16.2] — alpha, built for thermal spray
 

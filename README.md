@@ -41,8 +41,12 @@ the direction are the program. Tools:
 | Select | S | Pick a stroke; drag to move round, scroll to zoom, Home to fit |
 | Line | L | Click points; they snap to the drawing's corners and lines (Shift to place one freely). Double-click or Enter finishes, Backspace takes one back, Escape cancels |
 | Draw | D | Freehand; thinned to the points that matter when you let go |
-| Trace | T | Click near an outline: once round it from that point, inset by the amount set |
+| Trace | T | Click near an outline: once round it from that point, inset by the amount set. **Half the width** latches, holding the inset at half the spot |
 | Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart. Previewed as you hover |
+
+Clicking a region a second time with Fill or Trace **replaces** the path it
+made, rather than laying another over the top, so you can change the spot or
+the step-over and click again to refine it.
 | Scale | M | Click two points a known distance apart, then type the true distance |
 
 Delete removes the selected stroke, R reverses it, and the stroke list

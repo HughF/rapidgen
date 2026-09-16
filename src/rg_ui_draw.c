@@ -89,6 +89,8 @@ void draw_forget(RgUi *ui)
     ui->panning = false;
     ui->selected = ui->hover_stroke = ui->hover_loop = -1;
     ui->scale_clicks = 0;
+    ui->gen_loop = -1;
+    ui->gen_count = 0;
     clear_preview(ui);
 }
 
@@ -198,6 +200,25 @@ static struct nk_color alpha(struct nk_color c, nk_byte a)
 {
     c.a = a;
     return c;
+}
+
+/*
+ * A colour blended against the canvas once, and opaque afterwards.
+ *
+ * The band a stroke covers is drawn as many overlapping quads and discs.
+ * Translucent, every overlap darkens the one beneath it, so passes a
+ * step-over apart stack up into visible boxes instead of the one continuous
+ * area they really coat. Blended here and filled opaque, the pieces paint the
+ * same colour over themselves and merge into a single even shape.
+ */
+static struct nk_color over(struct nk_color bg, struct nk_color c, nk_byte a)
+{
+    struct nk_color r;
+    r.r = (nk_byte)((int)bg.r + ((int)c.r - (int)bg.r) * (int)a / 255);
+    r.g = (nk_byte)((int)bg.g + ((int)c.g - (int)bg.g) * (int)a / 255);
+    r.b = (nk_byte)((int)bg.b + ((int)c.b - (int)bg.b) * (int)a / 255);
+    r.a = 255;
+    return r;
 }
 
 static void polyline(RgUi *ui, struct nk_command_buffer *cb, const RgPt *p, int n, bool closed,
@@ -340,14 +361,22 @@ static void arrow(RgUi *ui, struct nk_command_buffer *cb, float ax, float ay, fl
                      mx - dx * s + dy * s * 0.7f, my - dy * s - dx * s * 0.7f, col);
 }
 
-static void draw_stroke(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st, int index,
-                        bool selected, bool hovered)
+/* What the stroke coats. Drawn under the drawing, because it is opaque. */
+static void draw_stroke_band(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st,
+                             bool selected)
 {
     const RgTheme *t = ui->theme;
     struct nk_color line = selected ? t->warn : t->trace_a;
     float fan = (float)(spray_width(ui) * ui->zoom);
     if (isfinite(fan) && fan > S(ui, 3))
-        band(ui, cb, st->pts, st->n, fan, alpha(line, selected ? 70 : 42));
+        band(ui, cb, st->pts, st->n, fan, over(t->plot_bg, line, selected ? 70 : 42));
+}
+
+static void draw_stroke(RgUi *ui, struct nk_command_buffer *cb, const RgStroke *st, int index,
+                        bool selected, bool hovered)
+{
+    const RgTheme *t = ui->theme;
+    struct nk_color line = selected ? t->warn : t->trace_a;
     polyline(ui, cb, st->pts, st->n, false, S(ui, selected || hovered ? 2.6f : 1.8f), line);
 
     for (int k = 1; k < st->n; k++)
@@ -395,6 +424,36 @@ static void commit_stroke(RgUi *ui, const RgPt *pts, int n, const char *how)
                rg_stroke_length(pts, n));
 }
 
+/*
+ * Clicking a region a second time refines its path rather than laying
+ * another one over the top. What the last Fill or Trace made is remembered,
+ * and checked against the job before anything is removed — Delete, Clear all
+ * and Undo can all have moved or removed it since.
+ */
+static void drop_generated(RgUi *ui, int loop)
+{
+    if (ui->gen_loop != loop || ui->gen_tool != (int)ui->tool || ui->gen_count <= 0)
+        return;
+    if (ui->gen_first < 0 || ui->gen_first + ui->gen_count > ui->job.nstrokes)
+        return;
+    const RgStroke *st = &ui->job.strokes[ui->gen_first];
+    if (st->n != ui->gen_n || st->n < 1 || dist(st->pts[0], ui->gen_p0) > 1e-9)
+        return;
+    for (int i = ui->gen_count - 1; i >= 0; i--)
+        rg_job_delete_stroke(&ui->job, ui->gen_first + i);
+    ui->gen_count = 0;
+}
+
+static void remember_generated(RgUi *ui, int loop, int first, int count)
+{
+    ui->gen_loop = loop;
+    ui->gen_tool = (int)ui->tool;
+    ui->gen_first = first;
+    ui->gen_count = count;
+    ui->gen_n = ui->job.strokes[first].n;
+    ui->gen_p0 = ui->job.strokes[first].pts[0];
+}
+
 static void finish_line(RgUi *ui)
 {
     if (ui->ndraft >= 2)
@@ -426,7 +485,13 @@ static void trace_loop(RgUi *ui, int loop, RgPt near)
         ui_message(ui, true, "That outline could not be traced.");
         return;
     }
+    drop_generated(ui, loop);
+    int before = ui->job.nstrokes;
     commit_stroke(ui, pts, n, "Traced an outline as");
+    if (ui->job.nstrokes == before + 1)
+        remember_generated(ui, loop, before, 1);
+    else
+        ui->gen_count = 0;
     free(pts);
 }
 
@@ -458,11 +523,16 @@ static void fill_loop(RgUi *ui, int loop)
             return;
         }
     }
-    int added = 0;
+    drop_generated(ui, loop);
+    int before = ui->job.nstrokes, added = 0;
     for (int i = 0; i < n; i++)
         added += rg_job_add_stroke(&ui->job, st[i].pts, st[i].n);
     rg_strokes_free(st, n);
     ui->selected = ui->job.nstrokes - 1;
+    if (added > 0)
+        remember_generated(ui, loop, before, added);
+    else
+        ui->gen_count = 0;
     if (ui->fill_spiral)
         ui_message(ui, false, "Spiralled inward as %d stroke%s, rings %.1f mm apart", added,
                    added == 1 ? "" : "s", pitch);
@@ -674,6 +744,12 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
 
     grid(ui, cb, r);
 
+    /* The coating goes down first, under the drawing: it is opaque so that
+     * overlapping passes merge into one area, and the outline has to stay
+     * visible through it. */
+    for (int s = 0; s < ui->job.nstrokes; s++)
+        draw_stroke_band(ui, cb, &ui->job.strokes[s], s == ui->selected);
+
     if (ui->have_raw) {
         for (int i = 0; i < ui->drawing.n; i++)
             polyline(ui, cb, ui->drawing.paths[i].pts, ui->drawing.paths[i].n,
@@ -688,7 +764,8 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
         RgPt *pts;
         int n;
         if (rg_pattern_trace(&ui->shape.loops[ui->hover_loop], ui->mouse_mm, ui->inset, &pts, &n)) {
-            float fan = (float)(ui->job.fan_width * ui->zoom);
+            /* what the gun covers, which for a spot is not the fan width */
+            float fan = (float)(spray_width(ui) * ui->zoom);
             if (isfinite(fan) && fan > S(ui, 3))
                 band(ui, cb, pts, n, fan, alpha(t->trace_a, 28));
             polyline(ui, cb, pts, n, false, S(ui, 1.5f), alpha(t->trace_a, 150));
@@ -876,20 +953,39 @@ static void inspect_tool(RgUi *ui)
                 &ui->smoothing, 0.05, 50, 0.1, "mm");
         ui_label_wrap(ui, "Hold the button down and draw.", t->text_dim);
         break;
-    case TOOL_TRACE:
-        ui_prop(ui, "Inset", "How far inside the outline the gun runs. Half the gun's width "
-                "puts the edge of the spray on the outline; 0 runs on the line; negative runs "
-                "outside it", &ui->inset, -1000, 1000, 1, "mm");
-        button_row(ui, 2);
-        if (button(ui, "Half the width", "Inset by half what the gun covers, so the edge of "
-                   "the spray follows the outline", !isnan(spray_width(ui))))
+    case TOOL_TRACE: {
+        /* Latched, the inset follows the spot, so changing the gun does not
+         * leave yesterday's figure sitting in the box. */
+        bool half_ok = spray_width(ui) > 0.0;
+        if (ui->inset_half && half_ok)
             ui->inset = 0.5 * spray_width(ui);
-        if (button(ui, "On the line", "Run the gun on the outline itself", true))
+        if (ui_prop(ui, "Inset", "How far inside the outline the gun runs. Half the gun's width "
+                    "puts the edge of the spray on the outline; 0 runs on the line; negative runs "
+                    "outside it", &ui->inset, -1000, 1000, 1, "mm"))
+            ui->inset_half = false;          /* set by hand: stop following */
+        button_row(ui, 2);
+        ui_tip(ui, "Hold the inset at half what the gun covers, so the edge of the spray follows "
+               "the outline. Stays on, and follows the spot if you change it");
+        nk_bool latched = ui->inset_half ? nk_true : nk_false;
+        if (!half_ok)
+            nk_widget_disable_begin(ui->ctx);
+        if (nk_selectable_label(ui->ctx, "Half the width", NK_TEXT_CENTERED, &latched) && half_ok) {
+            ui->inset_half = latched != 0;
+            if (ui->inset_half)
+                ui->inset = 0.5 * spray_width(ui);
+        }
+        if (!half_ok)
+            nk_widget_disable_end(ui->ctx);
+        if (button(ui, "On the line", "Run the gun on the outline itself", true)) {
             ui->inset = 0.0;
+            ui->inset_half = false;
+        }
         ui_label_wrap(ui, "Click near an outline: the stroke starts at the nearest point and "
-                      "goes round once. A large inset on a tight shape can cross itself: "
-                      "check the preview.", t->text_dim);
+                      "goes round once, and clicking it again replaces that path. A large "
+                      "inset on a tight shape can cross itself: check the preview.",
+                      t->text_dim);
         break;
+    }
     case TOOL_FILL: {
         ui_check(ui, "Spiral", "Follow the outline inward instead of weaving back and forth: "
                  "one continuous path, driven round the work, with no square turn at the end "
