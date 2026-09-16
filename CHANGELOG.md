@@ -7,20 +7,49 @@ a second release on the same day.
 
 ### Added
 
-- **Lead-in and run-out tabs on a stroke.** The robot does not switch the
-  torch, so a stroke has to come onto the work already spraying and leave it
-  still spraying. A stroke now records how many points at each end are tab —
-  travelled and sprayed, but not on the part — written in the job file with
-  bars:
+- **Stretches of a stroke off the work.** The robot does not switch the
+  torch, so the gun comes onto the work already spraying and leaves it
+  still spraying. Any stretch of a stroke can now be marked off the work -
+  travelled and sprayed, but not on the part - and a segment is work only
+  when both its ends are. In the job file bars alternate off and work,
+  starting and ending off:
 
   ```
-  stroke = -20 50 | 50 50  550 50 | 620 50
-           lead-in |     work     | run-out
+  stroke = -60 0 | 0 0  400 0 | 460 0  460 6 | 400 6  0 6 | -60 6
+           lead-in |   pass   |  turnaround  |   pass    | run-out
   ```
 
-  A line with no bars is all work, as before, and is extended by `lead`
-  instead, so every job written until now still loads. A stroke with a tab
-  needs both bars; either end may be empty.
+  An end left empty is work; a line with no bars is all work, as before, so
+  every existing job still loads. Coated length, corners and the
+  continuous-gun check count only the work.
+- **A weave that turns round off the work.** The Fill tool's passes carry on
+  past the region's own outline by 5 x the spot - the shop's rule - or by
+  however far the gun needs to reach spray speed and stop again, if that is
+  more. The gun comes on at speed, stops and turns round clear of the part,
+  and leaves the same way. Never into a hole: a pass that ends at a hole's
+  edge stops on it.
+- **Lead-ins and run-outs on drawn strokes.** A stroke drawn with Line or Draw
+  gets a straight lead-in and run-out along its end segments, the same
+  length. On the canvas the coverage band follows only the work, and
+  stretches off it are drawn faint and thin.
+- **Checked against the part's outline.** A flat part's drawing now reaches
+  the plan, from the editor and from the command line. Everywhere the gun
+  comes on, turns round or leaves is checked to be off the part itself, not
+  just off the pattern, and the first one that is not is named and placed.
+  A run-out that is shorter than the distance the gun needs to reach speed
+  or stop is warned about, named as a lead-in, run-out or turnaround.
+
+### Fixed
+
+- **The program header said `Fan nan mm`.** Every program since the
+  thermal-spray rebuild printed the fan width in its header comment, which
+  a spot job does not have. It says `Spot 12 mm` now.
+- **laps > 1 was reported as having no effect.** Circuits were counted after
+  the notes about laps had already been decided, so a job with a racetrack
+  in it was told "no stroke closes on itself".
+- **The continuous-gun check tested a stroke's drawn ends**, not where the gun
+  really comes down and lifts. With a run-on the gun has already left the
+  work, so a pattern that was clean was warned about.
 
 ## [2026.09.16.3] — alpha, driving the path
 

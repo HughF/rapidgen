@@ -42,7 +42,7 @@ the direction are the program. Tools:
 | Line | L | Click points; they snap to the drawing's corners and lines (Shift to place one freely). Double-click or Enter finishes, Backspace takes one back, Escape cancels |
 | Draw | D | Freehand; thinned to the points that matter when you let go |
 | Trace | T | Click near an outline: once round it from that point, inset by the amount set. **Half the width** latches, holding the inset at half the spot |
-| Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart. Previewed as you hover |
+| Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart, turning round off the work. Previewed as you hover |
 
 Clicking a region a second time with Fill or Trace **replaces** the path it
 made, rather than laying another over the top, so you can change the spot or
@@ -94,18 +94,23 @@ would collapse in on itself, and a region with a hole in it is refused rather
 than spiralled, because a ring would run straight across the hole. The zig-zag
 fill is still there for parts that suit it.
 
-Because the robot does not switch the torch, a stroke can carry **tabs**: a
-lead-in it comes onto the work along, and a run-out it leaves along. Both are
-sprayed, neither is on the part, and they are drawn rather than calculated, so
-the gun can be brought on where the part allows it. In the job file bars mark
-them:
+Because the robot does not switch the torch, the gun comes onto the work
+already spraying and leaves it still spraying. Stretches of a stroke can be
+marked **off the work** - a lead-in, a run-out, or a weave's turnaround - which
+are sprayed but are not on the part. Lines and freehand strokes get a straight
+lead-in and run-out automatically, and the Fill tool's passes run on past the
+edge by 5 x the spot before they turn round: the gun stops and reverses clear
+of the part. In the job file bars mark them, alternating off and work:
 
 ```
-stroke = -20 50 | 50 50  550 50 | 620 50
-         lead-in |     work     | run-out
+stroke = -60 0 | 0 0  400 0 | 460 0  460 6 | 400 6  0 6 | -60 6
+         lead-in |   pass   |  turnaround  |   pass    | run-out
 ```
 
-A stroke with no tabs falls back to the automatic run-on and run-off below.
+With the part's drawing loaded, every place the gun comes on, turns round or
+leaves is checked to be off the part itself, and a run-out too short for the
+gun to stop in is named. A stroke with nothing marked off the work falls back
+to the automatic run-on and run-off below.
 
 Each open stroke is **run on and off**: extended past both ends by `lead` —
 by default far enough to reach spray speed and stop again, worked out from the
