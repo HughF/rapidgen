@@ -78,22 +78,33 @@ typedef enum { RG_GUN_CONTINUOUS = 0, RG_GUN_SWITCHED } RgGunKind;
 
 typedef struct { double y0, y1; } RgBand;
 
-/* A path the gun follows with the spray on, in drawing millimetres. */
 /*
- * A painted stroke, and the tabs at its ends.
+ * A painted stroke, and the stretches of it that are off the work.
  *
- * The robot does not switch the torch, so a stroke has to come onto the work
- * already spraying and leave it still spraying: the first `tab_in` points and
- * the last `tab_out` points are the lead-in and the run-out, which are
- * travelled and sprayed but are not on the part. The points between them are
- * the work. Both zero means the whole stroke is work, and the plan falls back
- * to extending it by `lead`.
+ * The robot does not switch the torch, so the gun comes onto the work already
+ * spraying and leaves it still spraying: along a lead-in, a run-out, or the
+ * turnaround at the end of a weave's pass. Those stretches are travelled and
+ * sprayed but are not on the part. `off[k]` puts point k off the work, and a
+ * segment is work only when both its ends are. `off` NULL means the whole
+ * stroke is work, and the plan runs its ends on by `lead` itself.
  */
 typedef struct {
-    RgPt *pts;
-    int   n;
-    int   tab_in, tab_out;
+    RgPt          *pts;
+    int            n;
+    unsigned char *off;
 } RgStroke;
+
+/* Whether point k of a stroke lies off the work. */
+static inline bool rg_stroke_off(const RgStroke *st, int k)
+{
+    return st->off && st->off[k];
+}
+
+/* Whether the segment arriving at point k (from k - 1) is on the work. */
+static inline bool rg_stroke_work_seg(const RgStroke *st, int k)
+{
+    return !rg_stroke_off(st, k - 1) && !rg_stroke_off(st, k);
+}
 
 typedef struct {
     /* What and where */
@@ -183,10 +194,9 @@ bool rg_job_copy(RgJob *dst, const RgJob *src);
 /* Append a stroke (copied); false out of memory. */
 bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n);
 
-/* ...with its lead-in and run-out: the first `tab_in` and last `tab_out`
- * points are off the work. Tabs that would overlap, or swallow the whole
- * stroke, are dropped rather than believed. */
-bool rg_job_add_stroke_tabs(RgJob *j, const RgPt *pts, int n, int tab_in, int tab_out);
+/* ...with some of it off the work (see RgStroke). `off` may be NULL. A stroke
+ * with no work on it at all is not believed, and is kept as all work. */
+bool rg_job_add_stroke_off(RgJob *j, const RgPt *pts, int n, const unsigned char *off);
 void rg_job_delete_stroke(RgJob *j, int index);
 
 /* Parse a job file's text over a job (normally defaulted first). The error

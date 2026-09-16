@@ -243,7 +243,7 @@ static void test_tabs(void)
     if (j.nstrokes == 1) {
         const RgStroke *st = &j.strokes[0];
         CHECK(st->n == 4);
-        CHECK(st->tab_in == 1 && st->tab_out == 1);
+        CHECK(st->off && st->off[0] && !st->off[1] && !st->off[2] && st->off[3]);
         /* the sections are concatenated in order, tabs included */
         CHECK_NEAR(st->pts[0].x, -20, 1e-9);
         CHECK_NEAR(st->pts[1].x, 50, 1e-9);
@@ -254,16 +254,27 @@ static void test_tabs(void)
     /* No bars at all: the one section is the WORK, not a giant lead-in. */
     rg_job_default(&j);
     CHECK(rg_job_parse(&j, "stroke = 50 50  550 50\n", err, sizeof err));
-    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 0);
+    CHECK(j.nstrokes == 1 && j.strokes[0].off == NULL);
     rg_job_free(&j);
 
     /* Either end may be empty, so long as both bars are there. */
     rg_job_default(&j);
     CHECK(rg_job_parse(&j, "stroke = | 50 50  550 50 | 620 50\n", err, sizeof err));
-    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 1);
+    CHECK(j.nstrokes == 1 && j.strokes[0].off && !j.strokes[0].off[0] && j.strokes[0].off[2]);
     rg_job_free(&j);
 
-    /* One bar is ambiguous, three is nonsense. */
+    /* A weave: lead-in | pass | turnaround | pass | run-out. */
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, "stroke = -60 0 | 0 0  400 0 | 460 0  460 6 | 400 6  0 6 | -60 6\n",
+                       err, sizeof err));
+    CHECK(j.nstrokes == 1 && j.strokes[0].n == 8);
+    if (j.nstrokes == 1 && j.strokes[0].off) {
+        static const unsigned char want[8] = { 1, 0, 0, 1, 1, 0, 0, 1 };
+        CHECK(memcmp(j.strokes[0].off, want, 8) == 0);
+    }
+    rg_job_free(&j);
+
+    /* The bars must pair up: an even number of sections says nothing. */
     rg_job_default(&j);
     CHECK(!rg_job_parse(&j, "stroke = -20 50 | 50 50  550 50\n", err, sizeof err));
     rg_job_free(&j);
@@ -271,16 +282,19 @@ static void test_tabs(void)
     CHECK(!rg_job_parse(&j, "stroke = -20 50 | 50 50 | 550 50 | 620 50\n", err, sizeof err));
     rg_job_free(&j);
 
-    /* Tabs that leave no work are not believed. */
+    /* A stroke with no work on it at all is not believed. */
     rg_job_default(&j);
     CHECK(rg_job_parse(&j, "stroke = -20 50  0 50 | | 620 50  700 50\n", err, sizeof err));
-    CHECK(j.nstrokes == 1 && j.strokes[0].tab_in == 0 && j.strokes[0].tab_out == 0);
+    CHECK(j.nstrokes == 1 && j.strokes[0].off == NULL);
     rg_job_free(&j);
 
     /* And the bars survive being written back out. round_trip validates what
      * it reads back, so this starts from a job that is actually complete. */
     char text[8192];
     snprintf(text, sizeof text, "%s\nstroke = -20 50 | 50 50  550 50 | 620 50\n",
+             rg_job_template_flat());
+    round_trip(text);
+    snprintf(text, sizeof text, "%s\nstroke = | 0 0  400 0 | 460 0  460 6 | 400 6  0 6 |\n",
              rg_job_template_flat());
     round_trip(text);
 
@@ -294,7 +308,8 @@ static void test_tabs(void)
     RgJob back;
     rg_job_default(&back);
     CHECK(rg_job_parse(&back, b.s, err, sizeof err));
-    CHECK(back.nstrokes == 1 && back.strokes[0].tab_in == 1 && back.strokes[0].tab_out == 1);
+    CHECK(back.nstrokes == 1 && back.strokes[0].off && back.strokes[0].off[0] &&
+          !back.strokes[0].off[1] && back.strokes[0].off[3]);
     rg_buf_free(&b);
     rg_job_free(&back);
     rg_job_free(&j);

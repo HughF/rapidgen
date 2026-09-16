@@ -254,11 +254,9 @@ static bool strokes_take(Strokes *list, Pts *v, double ca, double sa)
     RgPt *owned = realloc(v->p, (size_t)v->n * sizeof *owned);
     list->s[list->n].pts = owned ? owned : v->p;
     list->s[list->n].n = v->n;
-    /* Generated paths carry no tabs of their own; the caller puts them on.
-     * The list is realloc'd, so these would otherwise be whatever was in
-     * that memory. */
-    list->s[list->n].tab_in = 0;
-    list->s[list->n].tab_out = 0;
+    /* Generated paths carry no off-the-work stretches of their own yet. The
+     * list is realloc'd, so this would otherwise be whatever was in memory. */
+    list->s[list->n].off = NULL;
     list->n++;
     v->p = NULL;
     v->n = v->cap = 0;
@@ -281,8 +279,10 @@ static int cross_cmp(const void *pa, const void *pb)
 
 void rg_strokes_free(RgStroke *s, int n)
 {
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         free(s[i].pts);
+        free(s[i].off);
+    }
     free(s);
 }
 

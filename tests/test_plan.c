@@ -499,10 +499,10 @@ static void test_tabs(void)
         show(&pl);
     CHECK(ok);
     CHECK_NEAR(pl.stroke_length, 400.0, 1e-9);         /* the work, not the tabs */
-    CHECK_NEAR(pl.tab_length, 120.0, 1e-9);
+    CHECK_NEAR(pl.off_length, 120.0, 1e-9);
     CHECK(pl.lead_ends == 0);                          /* nothing run on by lead */
     CHECK(pl.short_tabs == 0);
-    CHECK(!has_issue(&pl, RG_WARN, "tab"));
+    CHECK(!has_issue(&pl, RG_WARN, "off the work"));
     /* home; approach, down onto the lead-in, 3 points, up; home — no run-on */
     CHECK(pl.nmoves == 8);
     if (pl.nmoves == 8) {
@@ -522,7 +522,7 @@ static void test_tabs(void)
     CHECK(rg_plan_build(&j, NULL, &pl));
     CHECK(pl.short_tabs == 2);
     CHECK_NEAR(pl.shortest_tab, 20.0, 1e-9);
-    CHECK(has_issue(&pl, RG_WARN, "2 tabs are shorter than the 28.5 mm"));
+    CHECK(has_issue(&pl, RG_WARN, "2 runs off the work are shorter than the 28.5 mm"));
     CHECK(has_issue(&pl, RG_WARN, "stroke 1's lead-in at 20.0 mm"));
     rg_plan_free(&pl);
     rg_job_free(&j);
@@ -531,7 +531,7 @@ static void test_tabs(void)
     only_stroke(&j, "stroke = | 50 200  450 200 | 510 200");
     CHECK(rg_plan_build(&j, NULL, &pl));
     CHECK(pl.lead_ends == 1);
-    CHECK_NEAR(pl.tab_length, 60.0, 1e-9);
+    CHECK_NEAR(pl.off_length, 60.0, 1e-9);
     CHECK(pl.nmoves == 8);
     if (pl.nmoves == 8)
         CHECK_NEAR(pl.moves[2].tcp.pos.x, 50.0 - pl.lead_used, 1e-9);
@@ -563,6 +563,37 @@ static void test_tabs(void)
         CHECK_NEAR(pl.moves[8].tcp.pos.x, -10.0, 1e-9);  /* then out along the run-out */
         CHECK(pl.moves[8].zone == RG_Z_TRAVEL);
     }
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /*
+     * A weave: two passes, the gun running 60 mm past the edge, stepping over
+     * and coming back. The turnaround is off the work: not coated length, not
+     * a corner that thickens the coat, and long enough to stop in.
+     */
+    only_stroke(&j, "stroke = -60 100 | 0 100  400 100 | 460 100  460 106 | "
+                    "400 106  0 106 | -60 106");
+    ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+    CHECK_NEAR(pl.stroke_length, 800.0, 1e-9);
+    CHECK_NEAR(pl.off_length, 60.0 + 60.0 + 6.0 + 60.0 + 60.0, 1e-9);
+    CHECK(pl.sharp_corners == 0);
+    CHECK(pl.short_tabs == 0);
+    CHECK(pl.circuits == 0 && pl.lead_ends == 0);
+    CHECK(pl.transit_drops == 0);
+    check_moves_consistent(&j, &pl);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Turning round only 10 mm past the edge: named as a turnaround. */
+    only_stroke(&j, "stroke = -60 100 | 0 100  400 100 | 410 100  410 106 | "
+                    "400 106  0 106 | -60 106");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.short_tabs == 2);
+    CHECK_NEAR(pl.shortest_tab, 10.0, 1e-9);
+    CHECK(has_issue(&pl, RG_WARN, "stroke 1's turnaround at 10.0 mm"));
     rg_plan_free(&pl);
     rg_job_free(&j);
 }

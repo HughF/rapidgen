@@ -85,43 +85,50 @@ void rg_job_default(RgJob *j)
 
 void rg_job_free(RgJob *j)
 {
-    for (int i = 0; i < j->nstrokes; i++)
+    for (int i = 0; i < j->nstrokes; i++) {
         free(j->strokes[i].pts);
+        free(j->strokes[i].off);
+    }
     free(j->strokes);
     j->strokes = NULL;
     j->nstrokes = 0;
 }
 
-bool rg_job_add_stroke_tabs(RgJob *j, const RgPt *pts, int n, int tab_in, int tab_out)
+bool rg_job_add_stroke_off(RgJob *j, const RgPt *pts, int n, const unsigned char *off)
 {
     if (n < 1)
         return true;
+    /* Only keep the flags when they say something: some of the stroke off
+     * the work and some of it on. All off is not a stroke of work at all. */
+    int noff = 0;
+    for (int k = 0; off && k < n; k++)
+        noff += off[k] != 0;
+    bool keep = noff > 0 && noff < n;
+
     RgStroke *s = realloc(j->strokes, (size_t)(j->nstrokes + 1) * sizeof *s);
     if (!s)
         return false;
     j->strokes = s;
     RgPt *copy = malloc((size_t)n * sizeof *copy);
-    if (!copy)
+    unsigned char *flags = keep ? malloc((size_t)n) : NULL;
+    if (!copy || (keep && !flags)) {
+        free(copy);
+        free(flags);
         return false;
+    }
     memcpy(copy, pts, (size_t)n * sizeof *copy);
+    for (int k = 0; keep && k < n; k++)
+        flags[k] = off[k] != 0;
     s[j->nstrokes].pts = copy;
     s[j->nstrokes].n = n;
-    /* Tabs that overlap, or leave no work between them, are not tabs. */
-    if (tab_in < 0)
-        tab_in = 0;
-    if (tab_out < 0)
-        tab_out = 0;
-    if (tab_in + tab_out >= n)
-        tab_in = tab_out = 0;
-    s[j->nstrokes].tab_in = tab_in;
-    s[j->nstrokes].tab_out = tab_out;
+    s[j->nstrokes].off = flags;
     j->nstrokes++;
     return true;
 }
 
 bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
 {
-    return rg_job_add_stroke_tabs(j, pts, n, 0, 0);
+    return rg_job_add_stroke_off(j, pts, n, NULL);
 }
 
 void rg_job_delete_stroke(RgJob *j, int index)
@@ -129,6 +136,7 @@ void rg_job_delete_stroke(RgJob *j, int index)
     if (index < 0 || index >= j->nstrokes)
         return;
     free(j->strokes[index].pts);
+    free(j->strokes[index].off);
     memmove(&j->strokes[index], &j->strokes[index + 1],
             (size_t)(j->nstrokes - index - 1) * sizeof j->strokes[0]);
     j->nstrokes--;
@@ -140,8 +148,8 @@ bool rg_job_copy(RgJob *dst, const RgJob *src)
     dst->strokes = NULL;
     dst->nstrokes = 0;
     for (int i = 0; i < src->nstrokes; i++)
-        if (!rg_job_add_stroke_tabs(dst, src->strokes[i].pts, src->strokes[i].n,
-                                    src->strokes[i].tab_in, src->strokes[i].tab_out)) {
+        if (!rg_job_add_stroke_off(dst, src->strokes[i].pts, src->strokes[i].n,
+                                   src->strokes[i].off)) {
             rg_job_free(dst);
             return false;
         }
@@ -191,9 +199,10 @@ static const char G_GUN[]   = "the gun";
 static const char G_PROG[]  = "around the program";
 static const char G_RULES[] = "rules the plan must keep";
 static const char G_PAINT[] = "the painted strokes, in order: x y pairs in drawing mm.\n"
-                              "# Bars mark the tabs, which are sprayed but not on the part:\n"
+                              "# Bars mark where the gun is off the work, sprayed but not on the part:\n"
                               "#   stroke = -20 40 | 40 40  460 40 | 520 40\n"
-                              "#            lead-in |    work     | run-out";
+                              "#            lead-in |    work     | run-out\n"
+                              "# and a weave adds  turnaround | work  for each pass after the first";
 
 static const Key keys[] = {
     { "name",            K_IDENT,  F(name),            S(name),         0, 0, G_WHAT },
@@ -482,10 +491,13 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
 
     case K_STROKE: {
         /*
-         * Up to three sections, lead-in | work | run-out. The robot does not
-         * switch the torch, so the tabs are where the gun comes onto the work
-         * and where it leaves. A line with no bars is all work, and the plan
-         * extends it by `lead` itself.
+         * Bars split a stroke into sections that alternate off the work and
+         * on it, starting and ending off it:
+         *     lead-in | work | turnaround | work | ... | run-out
+         * Any off section may be empty. The robot does not switch the torch,
+         * so these are where the gun comes onto the work, turns round beyond
+         * it, and leaves. With no bars the whole line is work, and the plan
+         * runs its ends on by `lead` itself.
          */
         size_t vlen = strlen(v);
         char *buf = malloc(vlen + 1);
@@ -494,73 +506,72 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
             return false;
         }
         memcpy(buf, v, vlen + 1);
-
-        char *sect[3] = { buf, NULL, NULL };
         int nsect = 1;
-        for (char *q = buf; *q; q++) {
-            if (*q != '|')
-                continue;
-            if (nsect == 3) {
-                free(buf);
-                snprintf(why, whycap, "a stroke takes at most two bars: "
-                                      "lead-in | work | run-out");
-                return false;
-            }
-            *q = '\0';
-            sect[nsect++] = q + 1;
-        }
-        if (nsect == 2) {
+        for (const char *q = buf; *q; q++)
+            nsect += *q == '|';
+        if (nsect > 1 && nsect % 2 == 0) {
             free(buf);
-            snprintf(why, whycap, "a stroke with a tab needs both bars: "
-                                  "lead-in | work | run-out, either end may be empty");
+            snprintf(why, whycap, "the bars must pair up: lead-in | work | run-out, with "
+                                  "turnaround | work for each pass after the first; an end "
+                                  "may be empty");
             return false;
         }
 
-        int count[3] = { 0, 0, 0 };
-        double *part[3] = { NULL, NULL, NULL };
+        RgPt *pts = NULL;
+        unsigned char *off = NULL;
+        int npts = 0, si = 0;
         bool ok = true;
-        for (int i = 0; ok && i < nsect; i++) {
-            part[i] = numbers_all(sect[i], &count[i]);
-            if (count[i] < 0) {
+        for (char *sec = buf; ok; si++) {
+            char *bar = strchr(sec, '|');
+            if (bar)
+                *bar = '\0';
+            int cnt;
+            double *nums = numbers_all(sec, &cnt);
+            if (cnt < 0) {
                 snprintf(why, whycap, "expected numbers: x y pairs");
                 ok = false;
-            } else if (count[i] % 2) {
-                snprintf(why, whycap, "expected x y pairs%s",
-                         nsect == 3 ? ", in every section" : "");
+            } else if (cnt % 2) {
+                snprintf(why, whycap, "expected x y pairs%s", nsect > 1 ? ", in every section" : "");
                 ok = false;
+            } else if (cnt > 0) {
+                int add = cnt / 2;
+                RgPt *np = realloc(pts, (size_t)(npts + add) * sizeof *np);
+                if (np)
+                    pts = np;
+                unsigned char *nf = np ? realloc(off, (size_t)(npts + add)) : NULL;
+                if (nf)
+                    off = nf;
+                if (!np || !nf) {
+                    snprintf(why, whycap, "out of memory");
+                    ok = false;
+                }
+                for (int p = 0; ok && p < add; p++, npts++) {
+                    pts[npts].x = nums[2 * p];
+                    pts[npts].y = nums[2 * p + 1];
+                    off[npts] = nsect > 1 && si % 2 == 0;
+                    if (!in_range(k, pts[npts].x) || !in_range(k, pts[npts].y)) {
+                        snprintf(why, whycap, "point %d is outside %g to %g", npts + 1, k->lo,
+                                 k->hi);
+                        ok = false;
+                    }
+                }
             }
+            free(nums);
+            if (!bar)
+                break;
+            sec = bar + 1;
         }
-        int n = ok ? count[0] + count[1] + count[2] : 0;
-        if (ok && (n < 4 || n % 2)) {
+        if (ok && npts < 2) {
             snprintf(why, whycap, "expected x y pairs, at least two points");
             ok = false;
         }
-        RgPt *pts = ok ? malloc((size_t)(n / 2) * sizeof *pts) : NULL;
-        if (ok && !pts) {
-            snprintf(why, whycap, "out of memory");
-            ok = false;
-        }
-        for (int i = 0, at = 0; ok && i < nsect; i++)
-            for (int p = 0; ok && p < count[i] / 2; p++, at++) {
-                pts[at].x = part[i][2 * p];
-                pts[at].y = part[i][2 * p + 1];
-                if (!in_range(k, pts[at].x) || !in_range(k, pts[at].y)) {
-                    snprintf(why, whycap, "point %d is outside %g to %g", at + 1, k->lo, k->hi);
-                    ok = false;
-                }
-            }
         if (ok) {
-            /* With no bars the one section is the work, not a tab. */
-            int tab_in = nsect == 3 ? count[0] / 2 : 0;
-            int tab_out = nsect == 3 ? count[2] / 2 : 0;
-            ok = rg_job_add_stroke_tabs(j, pts, n / 2, tab_in, tab_out);
+            ok = rg_job_add_stroke_off(j, pts, npts, nsect > 1 ? off : NULL);
             if (!ok)
                 snprintf(why, whycap, "out of memory");
         }
         free(pts);
-        free(part[0]);
-        free(part[1]);
-        free(part[2]);
+        free(off);
         free(buf);
         return ok;
     }
@@ -717,18 +728,20 @@ static void write_key(RgBuf *b, const RgJob *j, const Key *k)
     case K_STROKE:
         for (int i = 0; i < j->nstrokes; i++) {
             const RgStroke *st = &j->strokes[i];
-            bool tabs = st->tab_in > 0 || st->tab_out > 0;
             rg_buf_printf(b, "%-15s =", k->key);
+            /* A bar wherever the stroke goes onto or off the work. Sections
+             * start and end off it, so an end that is work gets an empty
+             * section before or after it. */
+            if (st->off && !st->off[0])
+                rg_buf_puts(b, "  |");
             for (int p = 0; p < st->n; p++) {
                 char x[32], y[32];
-                /* lead-in | work | run-out, and always both bars when there
-                 * are tabs at all: the reader takes two or none. */
-                if (tabs && (p == st->tab_in || p == st->n - st->tab_out))
+                if (st->off && p > 0 && !st->off[p] != !st->off[p - 1])
                     rg_buf_puts(b, "  |");
                 rg_buf_printf(b, "  %s %s", rg_fmt(x, sizeof x, st->pts[p].x, 3),
                               rg_fmt(y, sizeof y, st->pts[p].y, 3));
             }
-            if (tabs && st->tab_out == 0)
+            if (st->off && !st->off[st->n - 1])
                 rg_buf_puts(b, "  |");
             rg_buf_puts(b, "\n");
         }
@@ -1031,10 +1044,12 @@ const char *rg_job_template_flat(void)
 "#cool_signal = doCoolAir      # held on through the dwell between cycles\n"
 "\n"
 "# ---- the painted strokes, in order: x y pairs in drawing mm ----------------\n"
-"# Bars mark the tabs: the lead-in the gun comes on along, and the run-out it\n"
-"# leaves along. Both are sprayed - the robot does not switch the torch - but\n"
-"# neither is on the part. With no bars the whole stroke is work, and it is\n"
-"# extended by `lead` instead.\n"
+"# Bars mark where the gun is off the work: the lead-in it comes on along, the\n"
+"# run-out it leaves along, and between a weave's passes the turnaround. All\n"
+"# are sprayed - the robot does not switch the torch - but none is on the\n"
+"# part. Sections alternate off | work | off ... and start and end off, so an\n"
+"# end may be left empty. With no bars the whole stroke is work, run on by\n"
+"# `lead` instead.\n"
 "#   stroke = -20 50 | 50 50  550 50 | 620 50\n"
 "stroke = 50 50  550 50  550 130  50 130\n"
 "stroke = 50 300  550 300\n";

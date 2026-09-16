@@ -96,13 +96,13 @@ static void flat(RgBuf *b, const RgJob *j, const RgPlan *pl)
                          "leaving the work\n", pl->circuits, pl->circuits == 1 ? "" : "s",
                       pl->laps);
     gun_line(b, j, pl);
-    if (pl->tab_length > 0.0)
-        rg_buf_printf(b, "Tabs        %.0f mm a cycle sprayed off the work, on lead-ins and "
-                         "run-outs\n", pl->tab_length);
+    if (pl->off_length > 0.0)
+        rg_buf_printf(b, "Off work    %.0f mm a cycle sprayed off the part: lead-ins, run-outs "
+                         "and turnarounds\n", pl->off_length);
     if (pl->lead_used > 0.0 && pl->lead_ends > 0)
         rg_buf_printf(b, "Run on/off  %.1f mm at each end (%.1f mm needed to reach speed)%s\n",
                       pl->lead_used, pl->lead_needed,
-                      pl->tab_length > 0.0 ? ", where no tab is drawn"
+                      pl->off_length > 0.0 ? ", where no lead-in or run-out is drawn"
                       : pl->circuits ? ", on the open strokes" : "");
     coating_line(b, j, pl);
 }
