@@ -220,7 +220,9 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
                         (job.drawing[0] && job.drawing[1] == ':');
         bool have_path = absolute ? (rg_copy(path, sizeof path, job.drawing), true)
                                   : plat_path_join(path, sizeof path, job_dir, job.drawing);
-        RgDxfOptions opt = { job.chord_tolerance, job.layer, false };
+        /* Read leniently, as the editor does: this outline is only checked
+         * against, and a drawing with a bad entity in it still has one. */
+        RgDxfOptions opt = { job.chord_tolerance, job.layer, true };
         int skipped = 0;
         if (have_path && rg_dxf_load(path, &opt, &drawing, err, sizeof err)) {
             rg_drawing_scale(&drawing, job.drawing_scale);

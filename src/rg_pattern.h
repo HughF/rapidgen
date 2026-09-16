@@ -97,6 +97,47 @@ int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke *
  */
 int rg_pattern_spiral(const RgShape *s, int which, double first, double pitch, RgStroke **out);
 
+/*
+ * A closed track - a band between an outer and an inner edge, like a seal
+ * face - covered by rings driven round it from the outside in.
+ *
+ * The first pass lies `first_out` outside the outer edge and the last
+ * `last_past` past the inner edge, into the middle; between them the passes
+ * are spaced evenly, no further apart than `step`. With both edges given,
+ * each ring is an offset of the edge nearer it, so a track that narrows is
+ * still followed on both sides; with only the outer edge, every ring is an
+ * offset of it and `width` says where the inner edge is. Where an offset
+ * folds on itself at a tight concave corner, the fold is cut out.
+ *
+ * All the rings run the same way round. Each starts where the ring outside it
+ * did - at the point nearest `seam` for the first - and the gun moves from
+ * one ring to the next by drifting across over `drift` of path rather than
+ * jogging, so the stepover is spread along the track. It comes on along a
+ * `lead` tangent to the first ring and leaves along a `lead` into the middle,
+ * both off the work.
+ */
+typedef struct {
+    int    outer;          /* loop index of the track's outer edge            */
+    int    inner;          /* loop index of its inner edge, or -1: use width  */
+    double width;          /* the track's width when no inner edge is given   */
+    double first_out;      /* first pass this far outside the outer edge      */
+    double last_past;      /* last pass this far past the inner edge          */
+    double step;           /* passes no further apart than this               */
+    double drift;          /* path the gun takes to move to the next ring     */
+    double lead;           /* lead-in and run-out, off the work               */
+    RgPt   seam;           /* where the rings step from one to the next       */
+} RgRingOpts;
+
+typedef struct {
+    int    rings;
+    double spacing;                    /* between passes, <= step           */
+    double width, width_min, width_max; /* the track, measured or given     */
+    char   why[200];                   /* when no path could be made        */
+} RgRingInfo;
+
+/* One stroke into *out and 1, or 0 with info->why, or -1 out of memory. */
+int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRingInfo *info);
+
 void rg_strokes_free(RgStroke *s, int n);
 
 #endif /* RG_PATTERN_H */

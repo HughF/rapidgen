@@ -273,6 +273,147 @@ static void test_fill_runout(void)
     rg_drawing_free(&d);
 }
 
+/* A stadium: straights 200 long, semicircles of radius r at x = +-100. */
+static const char *stadium(char *buf, size_t cap, double r)
+{
+    snprintf(buf, cap,
+             "0\nLINE\n8\n0\n10\n-100\n20\n%g\n11\n100\n21\n%g\n"
+             "0\nARC\n8\n0\n10\n100\n20\n0\n40\n%g\n50\n-90\n51\n90\n"
+             "0\nLINE\n8\n0\n10\n100\n20\n%g\n11\n-100\n21\n%g\n"
+             "0\nARC\n8\n0\n10\n-100\n20\n0\n40\n%g\n50\n90\n51\n270\n",
+             -r, -r, r, r, r, r);
+    return buf;
+}
+
+/* The track's edge a point is nearest, signed: + inside the outer edge. */
+static double from_outer(const RgLoop *outer, RgPt p)
+{
+    double d = rg_loop_nearest(outer, p, NULL);
+    return rg_loop_contains(outer, p) ? d : -d;
+}
+
+static bool stroke_crosses_itself(const RgStroke *st)
+{
+    for (int i = 0; i + 1 < st->n; i++)
+        for (int j = i + 2; j + 1 < st->n; j++) {
+            RgPt a = st->pts[i], b = st->pts[i + 1], c = st->pts[j], d = st->pts[j + 1];
+            double rx = b.x - a.x, ry = b.y - a.y, sx = d.x - c.x, sy = d.y - c.y;
+            double den = rx * sy - ry * sx;
+            if (fabs(den) < 1e-12)
+                continue;
+            double t = ((c.x - a.x) * sy - (c.y - a.y) * sx) / den;
+            double u = ((c.x - a.x) * ry - (c.y - a.y) * rx) / den;
+            if (t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6)
+                return true;
+        }
+    return false;
+}
+
+/*
+ * A closed track covered by rings from the outside in: the first pass outside
+ * the outer edge, the last past the inner edge, the gun drifting from ring to
+ * ring, on along a lead-in and off into the middle.
+ */
+static void test_rings(void)
+{
+    char out_e[1024], in_e[1024], both[2048];
+    snprintf(both, sizeof both, "%s%s", stadium(out_e, sizeof out_e, 100),
+             stadium(in_e, sizeof in_e, 80));
+    RgDrawing d;
+    RgShape s;
+    int skipped;
+    CHECK(drawing_of(both, &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+    CHECK(s.n == 2);
+    int o = fabs(rg_loop_area(&s.loops[0])) > fabs(rg_loop_area(&s.loops[1])) ? 0 : 1;
+    int in = 1 - o;
+
+    RgRingOpts opt = { o, in, 0, 6, 6, 6, 30, 60, { 0, 200 } };
+    RgStroke *st;
+    RgRingInfo info;
+    int n = rg_pattern_rings(&s, &opt, &st, &info);
+    CHECK(n == 1);
+    /* 6 + 20 + 6 = 32 mm across, no more than 6 apart: 7 passes, 5.33 apart */
+    CHECK(info.rings == 7);
+    CHECK_NEAR(info.spacing, 32.0 / 6.0, 1e-9);
+    CHECK_NEAR(info.width, 20.0, 0.3);
+    CHECK(info.width_max - info.width_min < 0.5);
+    if (n == 1) {
+        const RgStroke *r = &st[0];
+        CHECK(r->off && r->off[0] && r->off[r->n - 1]);
+        bool bounds = true, work = true;
+        for (int k = 1; k + 1 < r->n; k++) {
+            double sd = from_outer(&s.loops[o], r->pts[k]);
+            bounds = bounds && sd > -6.5 && sd < 26.5;
+            work = work && r->off && !r->off[k];
+        }
+        CHECK(bounds);
+        CHECK(work);
+        /* the first pass 6 outside the outer edge, the last 6 past the inner */
+        CHECK_NEAR(from_outer(&s.loops[o], r->pts[1]), -6.0, 0.3);
+        CHECK_NEAR(rg_loop_nearest(&s.loops[in], r->pts[r->n - 2], NULL), 6.0, 0.3);
+        CHECK(rg_loop_contains(&s.loops[in], r->pts[r->n - 2]));
+        /* on from outside the track, off into its middle */
+        CHECK(!rg_loop_contains(&s.loops[o], r->pts[0]));
+        CHECK(rg_loop_contains(&s.loops[in], r->pts[r->n - 1]));
+        CHECK(!stroke_crosses_itself(r));
+        rg_strokes_free(st, n);
+    }
+
+    /* Only the outer edge, and the width typed in: the same passes. */
+    RgRingOpts by_width = opt;
+    by_width.inner = -1;
+    by_width.width = 20;
+    n = rg_pattern_rings(&s, &by_width, &st, &info);
+    CHECK(n == 1 && info.rings == 7);
+    if (n > 0)
+        rg_strokes_free(st, n);
+
+    /* A last pass further past the inner edge than the middle is wide. */
+    RgRingOpts too_far = opt;
+    too_far.last_past = 200;
+    CHECK(rg_pattern_rings(&s, &too_far, &st, &info) == 0);
+    CHECK(strstr(info.why, "does not fit") != NULL);
+
+    /* The edges picked the wrong way round. */
+    RgRingOpts swapped = opt;
+    swapped.outer = in;
+    swapped.inner = o;
+    CHECK(rg_pattern_rings(&s, &swapped, &st, &info) == 0);
+    CHECK(strstr(info.why, "not inside") != NULL);
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+
+    /*
+     * An outline with a slot 10 mm wide cut into it. A pass 8 mm outside it
+     * folds across the slot - its walls pass each other - and the fold is cut
+     * out. (The width is small: legs 45 mm wide cannot hold passes deeper.)
+     */
+    CHECK(drawing_of("0\nLWPOLYLINE\n8\n0\n70\n1\n10\n0\n20\n0\n10\n100\n20\n0\n"
+                     "10\n100\n20\n100\n10\n55\n20\n100\n10\n55\n20\n50\n10\n45\n20\n50\n"
+                     "10\n45\n20\n100\n10\n0\n20\n100\n", &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+    RgRingOpts slot = { 0, -1, 4, 8, 0, 4, 20, 40, { 0, -50 } };
+    n = rg_pattern_rings(&s, &slot, &st, &info);
+    CHECK(n == 1);
+    if (n == 1) {
+        CHECK(!stroke_crosses_itself(&st[0]));
+        /* Nothing deeper than the innermost pass, 4 mm in - or its mitred
+         * corners, 4 x sqrt 2 from the corner they turn round: nothing has
+         * folded back through the part. */
+        bool clear = true;
+        for (int k = 1; k + 1 < st[0].n; k++)
+            clear = clear && from_outer(&s.loops[0], st[0].pts[k]) < 4.0 * sqrt(2.0) + 0.05;
+        CHECK(clear);
+        CHECK(info.rings == 4);
+        rg_strokes_free(st, n);
+    } else {
+        printf("  slot: %s\n", info.why);
+    }
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+}
+
 static void test_fill(void)
 {
     char a[512], b[512], both[1024];
@@ -352,5 +493,6 @@ TEST_MAIN("test_pattern",
     test_lenient();
     test_fill();
     test_fill_runout();
+    test_rings();
     test_spiral();
 )
