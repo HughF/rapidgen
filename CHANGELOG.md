@@ -5,6 +5,8 @@ a second release on the same day.
 
 ## [Unreleased]
 
+## [2026.09.16.1] — alpha, DXF import fix
+
 ### Fixed
 
 - A DXF with `1.#QNAN`, `-1.#IND` or `1.#INF` in it — what a program built
@@ -109,4 +111,5 @@ the README before loading anything.
   and what is not checked.
 - Windows cross-build (`make windows`, `make windows-dist`).
 
+[2026.09.16.1]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.1
 [2026.09.16]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16
