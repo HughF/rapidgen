@@ -43,11 +43,11 @@ the direction are the program. Tools:
 | Draw | D | Freehand; thinned to the points that matter when you let go |
 | Trace | T | Click near an outline: once round it from that point, inset by the amount set. **Half the width** latches, holding the inset at half the spot |
 | Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart, turning round off the work. Previewed as you hover |
+| Scale | M | Click two points a known distance apart, then type the true distance |
 
 Clicking a region a second time with Fill or Trace **replaces** the path it
 made, rather than laying another over the top, so you can change the spot or
 the step-over and click again to refine it.
-| Scale | M | Click two points a known distance apart, then type the true distance |
 
 Delete removes the selected stroke, R reverses it, and the stroke list
 reorders them — the order is the order they are sprayed.
@@ -75,10 +75,11 @@ Exit status: `0` written, `1` bad input, `2` refused (the report says why).
 ## How each part is sprayed
 
 **Flat.** The gun points along the plane's normal at the standoff and follows
-each stroke at the spray speed, stopping on its last point. It lifts by the
-approach distance between strokes. More than one stroke needs `gun_signal`,
-because the gun has to be off in between; sharp corners are counted and
-reported, since the robot slows through each one and the coat builds up.
+each stroke at the spray speed, lifting by the approach distance between
+strokes. A thermal-spray torch runs the whole time (`gun = continuous`), so
+whatever the gun passes over between strokes is coated too; the checks measure
+that and warn. Sharp corners on the work are counted and reported, since the
+robot slows through each one and the coat builds up there.
 
 A stroke that **closes on itself is driven as a circuit**: the gun comes in
 once, goes round it `laps` times with the seam blended, and leaves once. That
