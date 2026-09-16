@@ -3,7 +3,7 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
-## [Unreleased]
+## [2026.09.16.3] — alpha, driving the path
 
 ### Added
 
@@ -205,6 +205,7 @@ the README before loading anything.
   and what is not checked.
 - Windows cross-build (`make windows`, `make windows-dist`).
 
+[2026.09.16.3]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.3
 [2026.09.16.2]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.2
 [2026.09.16.1]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.1
 [2026.09.16]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16
