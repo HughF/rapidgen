@@ -5,6 +5,15 @@ a second release on the same day.
 
 ## [Unreleased]
 
+## [2026.09.16] — first alpha
+
+An alpha: everything below is tested against unit tests and, for the editor,
+by driving the real program and reading the screenshots back. **No program it
+writes has been loaded onto an S4 controller, simulated, or run on a robot,**
+and the file format and the IRB 2400's kinematics conventions have not been
+checked against a real controller. See *What has and has not been proven* in
+the README before loading anything.
+
 ### Added
 
 - **Flat parts.** A part lying still on a plane, sprayed along *strokes*: the
@@ -56,9 +65,7 @@ a second release on the same day.
   stops exactly on its last point, and names the work object for the kind of
   part.
 
-## [Unreleased before the editor]
-
-### Added
+### Added before the editor: the command line and cylinders
 
 - Spray programs for an ABB IRB 2400 (/10, /16) on S4, S4C and S4C+
   controllers, for a cylinder on a rotator that turns continuously and
@@ -89,3 +96,5 @@ a second release on the same day.
   listing the derived process, the closest approach to every rule, warnings,
   and what is not checked.
 - Windows cross-build (`make windows`, `make windows-dist`).
+
+[2026.09.16]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16

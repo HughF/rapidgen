@@ -22,7 +22,7 @@
 #define RG_VERSION_H
 
 #define RAPIDGEN_NAME    "rapidgen"
-#define RAPIDGEN_VERSION "2026.09.15"
+#define RAPIDGEN_VERSION "2026.09.16"
 #define RAPIDGEN_TAGLINE "ABB S4 spray program generator"
 
 #endif /* RG_VERSION_H */

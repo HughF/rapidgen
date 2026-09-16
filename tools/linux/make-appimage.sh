@@ -166,7 +166,7 @@ cp "$HERE/rapidgen.desktop"        "$APPDIR/usr/share/applications/"
 cp "$HERE/rapidgen.png"            "$APPDIR/rapidgen.png"
 cp "$HERE/rapidgen.png"            "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
 cp "$ROOT/LICENSE"                "$APPDIR/usr/share/doc/rapidgen/"
-cp "$ROOT/docs/HELP.md"           "$APPDIR/usr/share/doc/rapidgen/"
+cp "$ROOT/README.md"              "$APPDIR/usr/share/doc/rapidgen/"
 chmod +x "$APPDIR/AppRun"
 
 # A face, so the interface looks the same everywhere.

@@ -335,7 +335,7 @@ static void mirror_vertices(Vtx *v, int nv)
 
 static bool do_lwpolyline(Ctx *c, Ent *e)
 {
-    bool mirror;
+    bool mirror = false;
     if (!plane_ok(c, e, &mirror))
         return false;
     if (mirror)
@@ -397,7 +397,7 @@ static bool do_polyline(Ctx *c, Ent *head)
     free(ve.v);
 
     if (ok && keep) {
-        bool mirror;
+        bool mirror = false;
         ok = plane_ok(c, &hdr, &mirror);
         if (ok && mirror)
             mirror_vertices(v, nv);
@@ -416,7 +416,7 @@ static bool do_line(Ctx *c, const Ent *e)
 
 static bool do_arc(Ctx *c, const Ent *e, bool circle)
 {
-    bool mirror;
+    bool mirror = false;
     if (!plane_ok(c, e, &mirror))
         return false;
     if (e->r40 <= 0.0)
