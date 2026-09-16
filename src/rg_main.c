@@ -211,6 +211,23 @@ static int cmd_job(const char *job_path, const char *out_dir, bool check_only)
     } else if (job.drawing[0]) {
         snprintf(source, sizeof source, "%.200s, painted over %.200s", plat_path_leaf(job_path),
                  plat_path_leaf(job.drawing));
+        /* A flat part's drawing is what its strokes were painted over. Its
+         * outline lets the plan check that the gun comes on, turns round and
+         * leaves clear of the part. Best effort: a drawing that will not load
+         * does not stop the program, and the report says what was not checked. */
+        char path[PLAT_PATH_MAX];
+        bool absolute = job.drawing[0] == '/' || job.drawing[0] == '\\' ||
+                        (job.drawing[0] && job.drawing[1] == ':');
+        bool have_path = absolute ? (rg_copy(path, sizeof path, job.drawing), true)
+                                  : plat_path_join(path, sizeof path, job_dir, job.drawing);
+        RgDxfOptions opt = { job.chord_tolerance, job.layer, false };
+        int skipped = 0;
+        if (have_path && rg_dxf_load(path, &opt, &drawing, err, sizeof err)) {
+            rg_drawing_scale(&drawing, job.drawing_scale);
+            have_shape = rg_shape_build_lenient(&drawing, job.join_tolerance, &shape, &skipped);
+            if (!have_shape)
+                rg_drawing_free(&drawing);
+        }
     } else {
         snprintf(source, sizeof source, "%s", plat_path_leaf(job_path));
     }

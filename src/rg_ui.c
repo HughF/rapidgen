@@ -777,7 +777,11 @@ static void plan_run(RgUi *ui)
     }
     ui->plan_err[0] = '\0';
 
-    rg_plan_build(&ui->job, have_shape ? &strict : NULL, &ui->plan);
+    /* A flat part's outline is the lenient shape the tools paint over: it
+     * lets the plan check the gun comes on and leaves clear of the part. */
+    const RgShape *outline = have_shape ? &strict
+                           : ui->job.part == RG_PART_FLAT && ui->have_raw ? &ui->shape : NULL;
+    rg_plan_build(&ui->job, outline, &ui->plan);
     ui->plan_built = true;
     if (have_shape)
         rg_shape_free(&strict);

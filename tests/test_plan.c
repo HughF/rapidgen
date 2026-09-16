@@ -472,6 +472,23 @@ static void test_flat(void)
     rg_job_free(&j);
 }
 
+/* A shape from DXF entities: the outlines a flat part was painted over. */
+static bool shape_of(const char *entities, RgDrawing *d, RgShape *s)
+{
+    char text[8192];
+    snprintf(text, sizeof text, "0\nSECTION\n2\nENTITIES\n%s0\nENDSEC\n0\nEOF\n", entities);
+    RgDxfOptions opt = { 0.2, NULL, false };
+    int skipped;
+    return rg_dxf_read(text, strlen(text), &opt, d, err, sizeof err) &&
+           rg_shape_build_lenient(d, 0.1, s, &skipped);
+}
+
+static void rect_into(RgBuf *b, double x0, double y0, double x1, double y1)
+{
+    rg_buf_printf(b, "0\nLWPOLYLINE\n8\n0\n70\n1\n10\n%g\n20\n%g\n10\n%g\n20\n%g\n"
+                     "10\n%g\n20\n%g\n10\n%g\n20\n%g\n", x0, y0, x1, y0, x1, y1, x0, y1);
+}
+
 /* A flat job whose only stroke is `stroke`, on the flat template's settings
  * (300 mm/s, accel 2000, 12 mm spot: lead_needed 28.5 mm). */
 static void only_stroke(RgJob *j, const char *extra)
@@ -598,7 +615,81 @@ static void test_tabs(void)
     rg_job_free(&j);
 }
 
+/*
+ * With the drawn outline, the plan can tell whether the gun comes on, turns
+ * round and leaves clear of the part itself - not just clear of the pattern.
+ * The part is 500 x 300 with a window, inside a border frame round the sheet.
+ */
+static void test_outline(void)
+{
+    RgBuf ents;
+    rg_buf_init(&ents);
+    rect_into(&ents, 0, 0, 500, 300);
+    rect_into(&ents, 200, 120, 300, 180);
+    rect_into(&ents, -150, -100, 650, 400);        /* the drawing's border */
+    RgDrawing d;
+    RgShape shape;
+    CHECK(shape_of(ents.s, &d, &shape));
+    rg_buf_free(&ents);
+    CHECK(shape.n == 3);
+
+    RgJob j;
+    RgPlan pl;
+
+    /* Tabs that stop short of the edge: still on the part, named. */
+    only_stroke(&j, "stroke = 100 60 | 150 60  350 60 | 400 60");
+    rg_plan_build(&j, &shape, &pl);
+    CHECK(pl.part_outline);
+    CHECK(pl.turns_on_part == 2);
+    CHECK(has_issue(&pl, RG_WARN, "2 places where the gun comes on, turns round or leaves are "
+                                  "still on the part"));
+    CHECK(has_issue(&pl, RG_WARN, "stroke 1's lead-in at (100, 60)"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Tabs past the edge: clear of the part, though inside the border. */
+    only_stroke(&j, "stroke = -60 60 | 0 60  500 60 | 560 60");
+    rg_plan_build(&j, &shape, &pl);
+    CHECK(pl.turns_on_part == 0);
+    CHECK(!has_issue(&pl, RG_WARN, "still on the part"));
+    CHECK(!has_issue(&pl, RG_NOTE, "no drawn outline"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* No tabs, mid-plate: the automatic run-on lands on the part. */
+    only_stroke(&j, "stroke = 150 60  350 60");
+    rg_plan_build(&j, &shape, &pl);
+    CHECK(pl.turns_on_part == 2);
+    CHECK(has_issue(&pl, RG_WARN, "stroke 1's run-on at (122, 60)"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* A tab ending in the window is off the part: the window is a hole. */
+    only_stroke(&j, "stroke = 250 60 | 250 20  400 20 | 460 20");
+    rg_plan_build(&j, &shape, &pl);
+    CHECK(pl.turns_on_part == 2);                /* both tab ends are on the part... */
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+    only_stroke(&j, "stroke = 250 150 | 250 100  400 100 | 560 100");
+    rg_plan_build(&j, &shape, &pl);
+    CHECK(pl.turns_on_part == 0);                /* ...these are in the window and past the edge */
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* Without the outline, the plan says what it could not check. */
+    only_stroke(&j, "stroke = 100 60 | 150 60  350 60 | 400 60");
+    rg_plan_build(&j, NULL, &pl);
+    CHECK(!pl.part_outline && pl.turns_on_part == 0);
+    CHECK(has_issue(&pl, RG_NOTE, "no drawn outline of the part was given"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    rg_shape_free(&shape);
+    rg_drawing_free(&d);
+}
+
 TEST_MAIN("test_plan",
+    test_outline();
     test_tabs();
     test_template_plan();
     test_bands();

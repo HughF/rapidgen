@@ -1095,7 +1095,7 @@ static void inspect_tool(RgUi *ui)
         else
             ui_info_row(ui, "Spacing", "set the spot and step-over");
         if (!ui->fill_spiral && turn_length(ui) > 0.0)
-            ui_info_rowf(ui, "Turns", "%.0f mm off the work, then back", turn_length(ui));
+            ui_info_rowf(ui, "Turns", "%.0f mm past the edge", turn_length(ui));
         if (!ui->fill_spiral)
             ui_check(ui, "Run past the edge", "Carry each pass half the gun's width past the "
                      "outline so the edge gets a full coat. Passes stop at the edge of a hole, "

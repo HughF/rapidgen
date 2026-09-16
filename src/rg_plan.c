@@ -40,6 +40,7 @@ typedef struct {
     int            counts[KIND_COUNT];
     bool           oom;
     double         fx0, fy0, fx1, fy1;   /* flat: where the part is taken to be */
+    const RgShape *part;                 /* flat: the outline painted over, or NULL */
 } Ctx;
 
 static void issue(Ctx *c, RgSeverity sev, const char *fmt, ...) RG_PRINTF(3, 4);
@@ -764,6 +765,65 @@ static void check_cylinder(Ctx *c)
               h, j->radius, j->standoff, j->clearance);
 }
 
+/*
+ * The region of the drawing a stroke's work was painted in: the innermost
+ * closed outline round most of its work, sampled along it and weighted by
+ * length. Innermost, not a count of outlines: a real drawing often has a
+ * border round everything, which would turn a plain inside/outside count
+ * inside out. -1 when the work lies in no outline.
+ */
+static int stroke_region(const RgShape *s, const RgStroke *st)
+{
+    double *weight = calloc((size_t)s->n, sizeof *weight);
+    if (!weight)
+        return -1;
+    for (int k = 1; k < st->n; k++) {
+        if (!rg_stroke_work_seg(st, k))
+            continue;
+        RgPt a = st->pts[k - 1], b = st->pts[k];
+        double len = hypot(b.x - a.x, b.y - a.y);
+        for (int t = 0; t < 8; t++) {
+            double u = (t + 0.5) / 8.0;
+            RgPt m = { a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u };
+            int l = rg_shape_loop_at(s, m);
+            if (l >= 0)
+                weight[l] += len / 8.0;
+        }
+    }
+    int best = -1;
+    for (int l = 0; l < s->n; l++)
+        if (weight[l] > 0.0 && (best < 0 || weight[l] > weight[best]))
+            best = l;
+    free(weight);
+    return best;
+}
+
+/* Whether p is on the part: inside the region and not in a hole of it. */
+static bool on_region(const RgShape *s, int region, RgPt p)
+{
+    const RgLoop *outer = &s->loops[region];
+    if (!rg_loop_contains(outer, p))
+        return false;
+    double area = fabs(rg_loop_area(outer));
+    for (int i = 0; i < s->n; i++) {
+        const RgLoop *l = &s->loops[i];
+        if (i != region && l->n > 0 && fabs(rg_loop_area(l)) < area &&
+            rg_loop_contains(outer, l->pts[0]) && rg_loop_contains(l, p))
+            return false;
+    }
+    return true;
+}
+
+/* Whether p is over the part: against the drawn outline when there is one,
+ * otherwise against the pattern's own footprint standing in for it. */
+static bool over_part(const Ctx *c, int region, RgPt p, double px0, double py0, double px1,
+                      double py1)
+{
+    if (c->part && region >= 0)
+        return on_region(c->part, region, p);
+    return p.x >= px0 && p.x <= px1 && p.y >= py0 && p.y <= py1;
+}
+
 static void check_flat(Ctx *c)
 {
     const RgJob *j = c->job;
@@ -899,25 +959,35 @@ static void check_flat(Ctx *c)
         for (int s = 0; s < j->nstrokes; s++) {
             if (j->strokes[s].n < 2)
                 continue;
-            Parts pa = stroke_parts(&j->strokes[s]);
+            const RgStroke *st = &j->strokes[s];
+            Parts pa = stroke_parts(st);
             RgPt a, z;
             double li, lo;
-            stroke_ends(&j->strokes[s], &pa, pl->lead_used, &a, &z, &li, &lo);
-            if (a.x >= px0 && a.x <= px1 && a.y >= py0 && a.y <= py1)
+            stroke_ends(st, &pa, pl->lead_used, &a, &z, &li, &lo);
+            int reg = c->part ? stroke_region(c->part, st) : -1;
+            /* With the outline, an end that is a lead-in, run-out or run-on
+             * is judged below, where it can be named; here only an end that
+             * comes straight down onto the work. */
+            bool judged = c->part && reg >= 0;
+            if (!(judged && (rg_stroke_off(st, 0) || li > 0.0)) &&
+                over_part(c, reg, a, px0, py0, px1, py1))
                 pl->transit_drops++;
-            if (z.x >= px0 && z.x <= px1 && z.y >= py0 && z.y <= py1)
+            if (!(judged && (rg_stroke_off(st, st->n - 1) || lo > 0.0)) &&
+                over_part(c, reg, z, px0, py0, px1, py1))
                 pl->transit_drops++;
             if (s + 1 < j->nstrokes && j->strokes[s + 1].n >= 2) {
                 Parts pb = stroke_parts(&j->strokes[s + 1]);
                 RgPt b, bz;
                 stroke_ends(&j->strokes[s + 1], &pb, pl->lead_used, &b, &bz, &li, &lo);
+                int reg_b = c->part ? stroke_region(c->part, &j->strokes[s + 1]) : -1;
                 /* however much of the hop between strokes passes over the part */
                 double n = 32.0, inside = 0.0;
                 double seg = hypot(b.x - z.x, b.y - z.y) / n;
                 for (int t = 0; t < (int)n; t++) {
                     double u = (t + 0.5) / n;
-                    double mx = z.x + (b.x - z.x) * u, my = z.y + (b.y - z.y) * u;
-                    if (mx >= px0 && mx <= px1 && my >= py0 && my <= py1)
+                    RgPt m = { z.x + (b.x - z.x) * u, z.y + (b.y - z.y) * u };
+                    if (over_part(c, reg, m, px0, py0, px1, py1) ||
+                        over_part(c, reg_b, m, px0, py0, px1, py1))
                         inside += seg;
                 }
                 pl->transit_over_part += inside;
@@ -929,6 +999,73 @@ static void check_flat(Ctx *c)
                   "coating it there. Order the strokes so the gun leaves the work before it "
                   "moves, or set gun = switched with a gun_signal",
                   pl->transit_over_part, pl->transit_drops, pl->transit_drops == 1 ? "" : "s");
+    }
+
+    /*
+     * Where the gun comes on, turns round or leaves has to be off the part
+     * itself - it is slowing or stopping there with the torch running. The
+     * pattern's footprint cannot say that; only the drawn outline can.
+     */
+    if (c->part) {
+        int first_s = -1;
+        RgPt first_p = { 0.0, 0.0 };
+        const char *first_kind = "";
+        for (int s = 0; s < j->nstrokes; s++) {
+            const RgStroke *st = &j->strokes[s];
+            if (st->n < 2)
+                continue;
+            int reg = stroke_region(c->part, st);
+            if (reg < 0)
+                continue;
+            Parts pa = stroke_parts(st);
+            RgPt a, z;
+            double li, lo;
+            stroke_ends(st, &pa, pl->lead_used, &a, &z, &li, &lo);
+            int fw = 0, lw = st->n - 1;
+            while (fw < st->n && rg_stroke_off(st, fw))
+                fw++;
+            while (lw > 0 && rg_stroke_off(st, lw))
+                lw--;
+            for (int k = -1; k <= st->n; k++) {
+                RgPt p;
+                const char *kind;
+                if (k == -1) {
+                    if (!(li > 0.0))
+                        continue;
+                    p = a;
+                    kind = "run-on";
+                } else if (k == st->n) {
+                    if (!(lo > 0.0))
+                        continue;
+                    p = z;
+                    kind = "run-off";
+                } else {
+                    if (!rg_stroke_off(st, k))
+                        continue;
+                    p = st->pts[k];
+                    kind = k < fw ? "lead-in" : k > lw ? "run-out" : "turnaround";
+                }
+                if (!on_region(c->part, reg, p))
+                    continue;
+                if (first_s < 0) {
+                    first_s = s;
+                    first_p = p;
+                    first_kind = kind;
+                }
+                pl->turns_on_part++;
+            }
+        }
+        if (pl->turns_on_part)
+            issue(c, RG_WARN, "%d place%s where the gun comes on, turns round or leaves %s still "
+                  "on the part; the first is stroke %d's %s at (%.0f, %.0f). The torch runs the "
+                  "whole time and the gun is slowing or stopping there, so that spot is coated "
+                  "heavily: carry it past the edge of the part", pl->turns_on_part,
+                  pl->turns_on_part == 1 ? "" : "s", pl->turns_on_part == 1 ? "is" : "are",
+                  first_s + 1, first_kind, first_p.x, first_p.y);
+    } else if (j->nstrokes) {
+        issue(c, RG_NOTE, "no drawn outline of the part was given, so where the gun comes on, "
+              "turns round and leaves was checked only against the pattern's own footprint, "
+              "not against the part itself");
     }
 }
 
@@ -975,6 +1112,8 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     c.job = job;
     c.pl = pl;
     c.flat = job->part == RG_PART_FLAT;
+    c.part = c.flat && shape && shape->n > 0 ? shape : NULL;
+    pl->part_outline = c.part != NULL;
     c.robot = rg_robot_find(job->robot);
     if (!c.robot) {
         issue(&c, RG_REFUSE, "robot \"%s\" is not known", job->robot);

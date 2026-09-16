@@ -240,6 +240,9 @@ static void test_flat_program(void)
      * work — every spray move blends */
     CHECK(count(s, ",vRgSpray,fine,tSprayGun\\WObj:=wRgPart;") == 0);
     CHECK(count(s, "CONST speeddata vRgSpray:=[300,500,5000,1000];") == 1);
+    /* what the gun is, and never "nan" in a comment on the controller */
+    CHECK(count(s, "  ! Spot 12 mm at 150 mm standoff\n") == 1);
+    CHECK(strstr(s, "nan") == NULL && strstr(s, "Fan") == NULL);
     CHECK(count(s, "SetDO") == 0);
     CHECK(count(s, "FOR nCycle FROM 1 TO 6 DO") == 1);
     CHECK(count(s, "ENDFOR") == 1);

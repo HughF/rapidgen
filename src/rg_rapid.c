@@ -197,13 +197,14 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
         rg_buf_printf(out, "  ! Flat part: %d stroke%s, %s mm at %s mm/s\n", j->nstrokes,
                       j->nstrokes == 1 ? "" : "s", rg_fmt(n1, sizeof n1, pl->stroke_length, 0),
                       rg_fmt(n2, sizeof n2, pl->spray_speed, 1));
-        rg_buf_printf(out, "  ! Fan %s mm at %s mm standoff\n",
-                      rg_fmt(n1, sizeof n1, j->fan_width, 1), rg_fmt(n2, sizeof n2, j->standoff, 1));
+        rg_buf_printf(out, "  ! %s %s mm at %s mm standoff\n", j->pattern == RG_PAT_FAN ? "Fan" : "Spot",
+                      rg_fmt(n1, sizeof n1, rg_job_width(j), 1), rg_fmt(n2, sizeof n2, j->standoff, 1));
     } else {
         rg_buf_printf(out, "  ! Cylinder radius %s mm on a rotator at %s rpm\n",
                       rg_fmt(n1, sizeof n1, j->radius, 1), rg_fmt(n2, sizeof n2, j->rpm, 1));
-        rg_buf_printf(out, "  ! Fan %s mm at %s mm standoff, pitch %s mm per turn\n",
-                      rg_fmt(n1, sizeof n1, j->fan_width, 1), rg_fmt(n2, sizeof n2, j->standoff, 1),
+        rg_buf_printf(out, "  ! %s %s mm at %s mm standoff, %s mm per turn\n",
+                      j->pattern == RG_PAT_FAN ? "Fan" : "Spot",
+                      rg_fmt(n1, sizeof n1, rg_job_width(j), 1), rg_fmt(n2, sizeof n2, j->standoff, 1),
                       rg_fmt(n3, sizeof n3, pl->pitch, 1));
     }
     rg_buf_puts(out, "  ! Not proven on a robot. Check it in simulation, then step\n"

@@ -102,6 +102,8 @@ struct RgPlan {
     int    cycles_for_target;   /* to reach target_thickness               */
     double surface_speed;       /* cylinder: the part's surface under the gun, mm/s */
     double transit_over_part;   /* continuous gun: travel coated in passing */
+    bool   part_outline;        /* flat: checked against the drawn outline */
+    int    turns_on_part;       /* ...places the gun comes on, turns or leaves on it */
     int    transit_drops;       /* ...and descents or lifts over the part  */
 
     RgBand bands[RG_MAX_BANDS];
@@ -128,8 +130,10 @@ struct RgPlan {
 };
 
 /* `shape` is the cylinder's drawing, or NULL when the job gives its bands
- * directly (and always for a flat part). The plan is filled either way; the
- * result is !refused. */
+ * directly. For a flat part it is the outline the strokes were painted over,
+ * or NULL: with it the plan checks the gun comes on, turns round and leaves
+ * clear of the part itself, not just of the pattern. The plan is filled
+ * either way; the result is !refused. */
 bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *plan);
 void rg_plan_free(RgPlan *plan);
 
