@@ -3,7 +3,7 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
-## [Unreleased]
+## [2026.09.16.2] — alpha, built for thermal spray
 
 ### Changed
 
@@ -40,6 +40,12 @@ a second release on the same day.
     at, and warns outside the 0.2–3 m/s thermal spraying usually runs at.
   - Part temperature is stated as not modelled, next to the dwell that exists
     to control it.
+  - The report, the editor's help text and the templates say *spot* where they
+    used to say *fan*: the part is coated "half the spot" past a band edge,
+    the Fill tool asks for the spot and the step-over, and the flat template
+    explains the gun's 90° turn on its mount as what keeps axis 5 clear of
+    straight, which is what it is for now that a round spot can run any way.
+    The README's screenshot is the Draw page as it is now.
 
 ## [2026.09.16.1] — alpha, DXF import fix
 
@@ -147,5 +153,6 @@ the README before loading anything.
   and what is not checked.
 - Windows cross-build (`make windows`, `make windows-dist`).
 
+[2026.09.16.2]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.2
 [2026.09.16.1]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16.1
 [2026.09.16]: https://github.com/HughF/rapidgen/releases/tag/2026.09.16
