@@ -428,8 +428,12 @@ static void remember_dir(char *dst, size_t cap, const char *path)
         snprintf(dst, cap, "%s", dir);
 }
 
-bool ui_open_path(RgUi *ui, const char *path)
+bool ui_open_path(RgUi *ui, const char *where)
 {
+    /* Called with settings.last_job and settings.recent[i], both rewritten
+     * below: work from a copy (see ui_save_to). */
+    char path[PLAT_PATH_MAX];
+    snprintf(path, sizeof path, "%s", where);
     RgJob j;
     rg_job_default(&j);
     char err[512];
@@ -468,8 +472,13 @@ static void drawing_path_for(const char *job_path, const char *abs, char *out, s
         snprintf(out, cap, "%s", abs);
 }
 
-bool ui_save_to(RgUi *ui, const char *path)
+bool ui_save_to(RgUi *ui, const char *where)
 {
+    /* Saving to the job's own file passes ui->path in, which is written below.
+     * snprintf from a buffer into itself is undefined, and glibc empties it:
+     * the job forgot its file - and so its drawing - on every plain Save. */
+    char path[PLAT_PATH_MAX];
+    snprintf(path, sizeof path, "%s", where);
     if (ui->loaded_from[0] && ui->job.drawing[0])
         drawing_path_for(path, ui->loaded_from, ui->job.drawing, sizeof ui->job.drawing);
 
