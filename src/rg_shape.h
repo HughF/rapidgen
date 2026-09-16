@@ -46,6 +46,7 @@ typedef struct {
 typedef struct {
     RgLoop *loops;
     int     n;
+    int     duplicates;  /* pieces drawn twice over, left out before joining */
     double *ybreaks;     /* sorted: every height at which coverage can change slope */
     int     nbreaks;
 } RgShape;

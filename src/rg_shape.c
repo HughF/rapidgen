@@ -119,12 +119,28 @@ static RgPt path_end(const RgPath *p, bool last)
     return last ? p->pts[p->n - 1] : p->pts[0];
 }
 
-static bool join_open(Build *b)
+/*
+ * Whether path j repeats path i: the same points, either way round, within
+ * the joining tolerance. CAD drawings often carry an entity drawn twice over,
+ * and a copy at a junction gives the greedy joiner two ends at no distance:
+ * it follows the copy straight back, closes a sliver on itself, and the real
+ * outline is left without the piece it needed.
+ */
+static bool same_path(const RgPath *a, const RgPath *b, double tol)
+{
+    if (a->n != b->n || a->closed != b->closed || a->n < 2)
+        return false;
+    bool fwd = true, rev = true;
+    for (int k = 0; k < a->n && (fwd || rev); k++) {
+        fwd = fwd && dist(a->pts[k], b->pts[k]) <= tol;
+        rev = rev && dist(a->pts[k], b->pts[a->n - 1 - k]) <= tol;
+    }
+    return fwd || rev;
+}
+
+static bool join_open(Build *b, bool *used)
 {
     const RgDrawing *d = b->d;
-    bool *used = calloc((size_t)(d->n ? d->n : 1), sizeof *used);
-    if (!used)
-        return oom(b);
     bool ok = true;
 
     for (int i = 0; i < d->n && ok; i++) {
@@ -183,7 +199,6 @@ static bool join_open(Build *b)
         }
         free(c.pts);
     }
-    free(used);
     return ok;
 }
 
@@ -322,11 +337,23 @@ static bool build(const RgDrawing *d, double join_tol, bool lenient, RgShape *ou
 {
     memset(out, 0, sizeof *out);
     Build b = { d, join_tol, lenient, 0, out, 0, err, errcap };
+    bool *used = calloc((size_t)(d->n ? d->n : 1), sizeof *used);
+    if (!used)
+        return oom(&b);
     bool ok = true;
+
+    /* Copies are marked used before anything is joined, so the joiner never
+     * sees two ends where the drawing means one. */
+    for (int i = 0; i < d->n; i++)
+        for (int j = 0; j < i && !used[i]; j++)
+            if (!used[j] && same_path(&d->paths[j], &d->paths[i], join_tol)) {
+                used[i] = true;
+                out->duplicates++;
+            }
 
     for (int i = 0; i < d->n && ok; i++) {
         const RgPath *p = &d->paths[i];
-        if (!p->closed)
+        if (!p->closed || used[i])
             continue;
         RgPt *pts = malloc((size_t)(p->n ? p->n : 1) * sizeof *pts);
         if (!pts) {
@@ -337,7 +364,8 @@ static bool build(const RgDrawing *d, double join_tol, bool lenient, RgShape *ou
         ok = take_loop(&b, pts, p->n, p->layer);
     }
     if (ok)
-        ok = join_open(&b);
+        ok = join_open(&b, used);
+    free(used);
     if (ok && out->n == 0 && !lenient) {
         snprintf(err, errcap, "the drawing has no closed outlines");
         ok = false;

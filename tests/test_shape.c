@@ -144,7 +144,62 @@ static void test_crossing_breaks(void)
     rg_shape_free(&s);
 }
 
+static const char *line(char *buf, size_t cap, double x0, double y0, double x1, double y1)
+{
+    snprintf(buf, cap, "0\nLINE\n8\n0\n10\n%g\n20\n%g\n11\n%g\n21\n%g\n", x0, y0, x1, y1);
+    return buf;
+}
+
+/*
+ * A real CAD drawing often has an entity drawn twice over. At a junction the
+ * copy gives the joiner two ends at no distance: it used to follow the copy
+ * straight back, close a zero-area sliver, and leave the real outline short
+ * of the piece it needed - so nothing closed.
+ */
+static void test_duplicates(void)
+{
+    char a[160], b[160], c[160], d[160], a2[160], c2[160], ents[2048];
+    snprintf(ents, sizeof ents, "%s%s%s%s%s%s",
+             line(a, sizeof a, 0, 0, 100, 0),
+             line(a2, sizeof a2, 0, 0, 100, 0),            /* the same line again */
+             line(b, sizeof b, 100, 0, 100, 100),
+             line(c, sizeof c, 100, 100, 0, 100),
+             line(c2, sizeof c2, 0, 100, 100, 100),        /* again, drawn backwards */
+             line(d, sizeof d, 0, 100, 0, 0));
+    RgShape s;
+    CHECK(shape_of(ents, &s));
+    CHECK(s.n == 1);
+    CHECK(s.duplicates == 2);
+    if (s.n == 1)
+        CHECK_NEAR(fabs(rg_loop_area(&s.loops[0])), 10000.0, 1e-6);
+    rg_shape_free(&s);
+
+    /* Two identical closed outlines are one outline. */
+    char r1[512], r2[512], both[1100];
+    snprintf(both, sizeof both, "%s%s", rect(r1, sizeof r1, 0, 0, 50, 50),
+             rect(r2, sizeof r2, 0, 0, 50, 50));
+    CHECK(shape_of(both, &s));
+    CHECK(s.n == 1 && s.duplicates == 1);
+    rg_shape_free(&s);
+
+    /* A line and its copy on their own enclose nothing: not an outline. */
+    snprintf(ents, sizeof ents, "%s%s%s", rect(r1, sizeof r1, 0, 0, 50, 50),
+             line(a, sizeof a, 200, 0, 300, 0), line(b, sizeof b, 300, 0, 200, 0.05));
+    RgDrawing dr;
+    char text[4096];
+    snprintf(text, sizeof text, "0\nSECTION\n2\nENTITIES\n%s0\nENDSEC\n0\nEOF\n", ents);
+    RgDxfOptions opt = { 0.2, NULL, false };
+    CHECK(rg_dxf_read(text, strlen(text), &opt, &dr, err, sizeof err));
+    int skipped = 0;
+    CHECK(rg_shape_build_lenient(&dr, 0.1, &s, &skipped));
+    CHECK(s.n == 1);                     /* the rectangle, and no sliver */
+    CHECK(skipped >= 1);
+    rg_shape_free(&s);
+    rg_drawing_free(&dr);
+}
+
 TEST_MAIN("test_shape",
+    test_duplicates();
     test_rectangle();
     test_joined_lines();
     test_gap_reported();

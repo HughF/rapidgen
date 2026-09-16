@@ -964,11 +964,13 @@ static void inspect_drawing(RgUi *ui)
                        "not necessarily the part itself");
                 ui_info_rowf(ui, "Extents", "%.1f \xc3\x97 %.1f mm", b[2] - b[0], b[3] - b[1]);
             }
+            char more[96] = "";
             if (ui->skipped)
-                ui_info_rowf(ui, "Outlines", "%d closed, %d open line%s", ui->shape.n, ui->skipped,
-                             ui->skipped == 1 ? "" : "s");
-            else
-                ui_info_rowf(ui, "Outlines", "%d closed", ui->shape.n);
+                snprintf(more, sizeof more, ", %d open", ui->skipped);
+            if (ui->shape.duplicates)
+                snprintf(more + strlen(more), sizeof more - strlen(more), ", %d cop%s",
+                         ui->shape.duplicates, ui->shape.duplicates == 1 ? "y" : "ies");
+            ui_info_rowf(ui, "Outlines", "%d closed%s", ui->shape.n, more);
             if (ui->drawing.unsupported) {
                 char buf[200];
                 snprintf(buf, sizeof buf, "%d item%s not shown (%s first): convert them to "
@@ -978,9 +980,15 @@ static void inspect_drawing(RgUi *ui)
             }
             if (ui->drawing.degenerate) {
                 char buf[220];
-                snprintf(buf, sizeof buf, "%d %s%s left out: the drawing gives them no real "
-                         "coordinates. A program cannot be generated from this drawing until "
-                         "they are deleted in CAD.", ui->drawing.degenerate,
+                /* A cylinder's program is made from its drawing, so pieces missing
+                 * from it refuse the program; a flat part's is made from its
+                 * strokes, and the drawing is only what they are painted over. */
+                snprintf(buf, sizeof buf, painting(ui)
+                         ? "%d %s%s left out: the drawing gives them no real coordinates. "
+                           "Check nothing you mean to paint over is missing."
+                         : "%d %s%s left out: the drawing gives them no real coordinates. A "
+                           "program cannot be generated from this drawing until they are "
+                           "deleted in CAD.", ui->drawing.degenerate,
                          ui->drawing.degenerate_kind[0] ? ui->drawing.degenerate_kind : "entity",
                          ui->drawing.degenerate == 1 ? "" : "s");
                 ui_label_wrap(ui, buf, t->warn);
