@@ -69,7 +69,11 @@ static void test_structure(void)
     CHECK(count(s, "VAR num nKey;") == 1);
     CHECK(count(s, "SetDO") == 0);
     CHECK(count(s, "PERS tooldata") == 0);
-    CHECK(count(s, "CONST speeddata vRgSpray:=[25,500,5000,1000];") == 1);
+    CHECK(count(s, "CONST speeddata vRgSpray:=[3,500,5000,1000];") == 1);
+    CHECK(count(s, "FOR nCycle FROM 1 TO 8 DO") == 1);
+    CHECK(count(s, "ENDFOR") == 1);
+    CHECK(count(s, "WaitTime 20;") == 1);
+    CHECK(count(s, "VAR num nCycle;") == 1);
     CHECK(count(s, "ConfL \\Off;") == 1);
     CHECK(strstr(s, "\\WObj:=wRgCylinder;") != NULL);
 
@@ -91,6 +95,9 @@ static void test_structure(void)
             t++;
         if (strncmp(t, "PROC ", 5) == 0) { in_proc = true; continue; }
         if (strncmp(t, "ENDPROC", 7) == 0) { in_proc = false; continue; }
+        /* FOR ... DO and ENDFOR are the loop, not statements */
+        if (strncmp(t, "FOR ", 4) == 0 || strncmp(t, "ENDFOR", 6) == 0)
+            continue;
         if (in_proc && *t && *t != '!')
             terminated = terminated && line[n - 1] == ';';
     }
@@ -162,7 +169,7 @@ static void test_dialects(void)
 static void test_options(void)
 {
     RgBuf b;
-    CHECK(program_for("gun_signal = doGunOn\nready_prompt = no\n"
+    CHECK(program_for("gun = switched\ngun_signal = doGunOn\nready_prompt = no\n"
                       "tool_define = yes\ntool_mass = 2.5\ntool_cog = 0 -40 80", &b, NULL));
     CHECK(count(b.s, "SetDO doGunOn,1;") == 1);
     CHECK(count(b.s, "SetDO doGunOn,0;") == 1);
@@ -227,13 +234,18 @@ static void test_flat_program(void)
     CHECK(strstr(s, "wRgCylinder") == NULL);
     CHECK(count(s, "! Stroke 1: 4 points, 1080 mm") == 1);
     CHECK(count(s, "! Stroke 2: 2 points, 500 mm") == 1);
-    CHECK(count(s, ",vRgSpray,z1,tSprayGun\\WObj:=wRgPart;") == 2);
-    CHECK(count(s, ",vRgSpray,fine,tSprayGun\\WObj:=wRgPart;") == 2);
+    CHECK(count(s, ",vRgSpray,z1,tSprayGun\\WObj:=wRgPart;") == 6);
+    CHECK(count(s, ",vRgSpray,z10,tSprayGun\\WObj:=wRgPart;") == 2);
+    /* the torch is continuous: nothing switches it, and nothing stops on the
+     * work — every spray move blends */
+    CHECK(count(s, ",vRgSpray,fine,tSprayGun\\WObj:=wRgPart;") == 0);
     CHECK(count(s, "CONST speeddata vRgSpray:=[300,500,5000,1000];") == 1);
-    CHECK(count(s, "SetDO doGunOn,1;") == 2);
-    CHECK(count(s, "SetDO doGunOn,0;") == 2);
-    const char *prompt = strstr(s, "TPReadFK"), *on = strstr(s, "SetDO doGunOn,1;");
-    CHECK(prompt && on && prompt < on);
+    CHECK(count(s, "SetDO") == 0);
+    CHECK(count(s, "FOR nCycle FROM 1 TO 6 DO") == 1);
+    CHECK(count(s, "ENDFOR") == 1);
+    CHECK(count(s, "WaitTime 15;") == 1);
+    const char *prompt = strstr(s, "TPReadFK"), *loop = strstr(s, "FOR nCycle");
+    CHECK(prompt && loop && loop < prompt);
     rg_buf_free(&b);
     rg_plan_free(&pl);
     rg_job_free(&j);
