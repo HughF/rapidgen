@@ -138,6 +138,27 @@ typedef struct {
 /* One stroke into *out and 1, or 0 with info->why, or -1 out of memory. */
 int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRingInfo *info);
 
+/*
+ * `count` versions of the same rings, one for each cycle, each stepping from
+ * ring to ring somewhere else round the track, so no one place takes every
+ * cycle's stepover. The places along the outer edge where the gun can come
+ * on and leave without its lead-in or run-out crossing the passes - at a
+ * waist, a tangent lead-in cuts back across the rings - are cut into `count`
+ * equal shares, and each version steps at a random point in the middle half
+ * of one of them, the shares taken in a random order: random, but no two
+ * seams nearer than half a share. The same `seed` gives the same seams.
+ * `o->seam` is not used.
+ *
+ * `count` strokes into *out numbered cycle 1..count and `count`, or 0 with
+ * info->why, or -1 out of memory.
+ */
+int rg_pattern_ring_seams(const RgShape *s, const RgRingOpts *o, int count, unsigned seed,
+                          RgStroke **out, RgRingInfo *info);
+
+/* Whether a stretch of the stroke off the work crosses its work: a lead-in or
+ * run-out that sprays back over the track with the torch on. */
+bool rg_stroke_off_crosses_work(const RgStroke *st);
+
 void rg_strokes_free(RgStroke *s, int n);
 
 #endif /* RG_PATTERN_H */

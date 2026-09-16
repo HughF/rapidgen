@@ -735,9 +735,27 @@ static void add_ring_arc(Pts *cur, const RgPt *r, int n, double from, double to,
     }
 }
 
-int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRingInfo *info)
+/* A track's rings, outermost first, all running the same way round. */
+typedef struct {
+    RgPt **p;
+    int   *n;
+    int    count;
+} Rings;
+
+static void rings_free(Rings *r)
 {
-    *out = NULL;
+    for (int k = 0; r->p && k < r->count; k++)
+        free(r->p[k]);
+    free(r->p);
+    free(r->n);
+    memset(r, 0, sizeof *r);
+}
+
+/* 1 with the rings, 0 with info->why, -1 out of memory. The seam plays no
+ * part: the same rings serve every place the gun could step at. */
+static int build_rings(const RgShape *s, const RgRingOpts *o, Rings *rs, RgRingInfo *info)
+{
+    memset(rs, 0, sizeof *rs);
     memset(info, 0, sizeof *info);
     if (o->outer < 0 || o->outer >= s->n || o->inner >= s->n || o->inner == o->outer) {
         snprintf(info->why, sizeof info->why, "pick the track's outer edge");
@@ -787,12 +805,12 @@ int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRi
 
     int cap = outer->n + (inner ? inner->n : 0) + 2;
     RgPt *tmp = malloc((size_t)cap * sizeof *tmp);
-    RgPt **ring = calloc((size_t)nrings, sizeof *ring);
-    int *rn = calloc((size_t)nrings, sizeof *rn);
+    rs->p = calloc((size_t)nrings, sizeof *rs->p);
+    rs->n = calloc((size_t)nrings, sizeof *rs->n);
+    rs->count = nrings;
     int result = -1;
-    Pts cur = { 0 };
-    if (!tmp || !ring || !rn)
-        goto done;
+    if (!tmp || !rs->p || !rs->n)
+        goto fail;
 
     for (int k = 0; k < nrings; k++) {
         double offset = -first_out + k * spacing;   /* inward from the outer edge */
@@ -821,7 +839,7 @@ int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRi
                      inset >= 0.0 ? "inside" : "outside", src == outer ? "outer" : "inner",
                      inset > 0.0 && src == inner ? "middle of the track" : "track");
             result = 0;
-            goto done;
+            goto fail;
         }
         if (area < 0.0)
             for (int a = 0, b = m - 1; a < b; a++, b--) {
@@ -829,13 +847,40 @@ int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRi
                 tmp[a] = tmp[b];
                 tmp[b] = t;
             }
-        ring[k] = malloc((size_t)(m + 1) * sizeof *ring[k]);
-        if (!ring[k])
-            goto done;
-        rn[k] = ring_start_at(tmp, m, k == 0 ? o->seam : ring[k - 1][0], ring[k]);
+        rs->p[k] = malloc((size_t)m * sizeof *rs->p[k]);
+        if (!rs->p[k])
+            goto fail;
+        memcpy(rs->p[k], tmp, (size_t)m * sizeof *tmp);
+        rs->n[k] = m;
     }
+    free(tmp);
+    return 1;
 
-    bool ok = true;
+fail:
+    free(tmp);
+    rings_free(rs);
+    return result;
+}
+
+/* The rings as one path stepping from ring to ring nearest `seam`, into *out.
+ * False when out of memory. */
+static bool assemble_rings(const Rings *rs, const RgRingOpts *o, RgPt seam, RgStroke *out)
+{
+    int nrings = rs->count;
+    RgPt **ring = calloc((size_t)nrings, sizeof *ring);
+    int *rn = calloc((size_t)nrings, sizeof *rn);
+    Pts cur = { 0 };
+    bool ok = ring && rn;
+    /* Each ring starts where the ring outside it did. */
+    for (int k = 0; ok && k < nrings; k++) {
+        ring[k] = malloc((size_t)(rs->n[k] + 1) * sizeof *ring[k]);
+        ok = ring[k] != NULL;
+        if (ok)
+            rn[k] = ring_start_at(rs->p[k], rs->n[k], k == 0 ? seam : ring[k - 1][0], ring[k]);
+    }
+    if (!ok)
+        goto done;
+
     /* On along a tangent to the first ring, off the work. */
     RgPt s0 = ring[0][0], s1 = ring[0][1];
     double t0 = dist(s0, s1);
@@ -887,16 +932,16 @@ int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRi
             ok = pts_add_off(&cur, e.x - (e.y - pe.y) / tl * o->lead,
                              e.y + (e.x - pe.x) / tl * o->lead, true);
     }
-    if (!ok)
-        goto done;
-
-    Strokes list = { 0 };
-    if (!strokes_take(&list, &cur, 1.0, 0.0)) {
-        rg_strokes_free(list.s, list.n);
-        goto done;
+    if (ok) {
+        Strokes list = { 0 };
+        ok = strokes_take(&list, &cur, 1.0, 0.0) && list.n == 1;
+        if (ok) {
+            *out = list.s[0];
+            free(list.s);
+        } else {
+            rg_strokes_free(list.s, list.n);
+        }
     }
-    *out = list.s;
-    result = list.n;
 
 done:
     pts_free(&cur);
@@ -904,6 +949,164 @@ done:
         free(ring[k]);
     free(ring);
     free(rn);
-    free(tmp);
+    return ok;
+}
+
+int rg_pattern_rings(const RgShape *s, const RgRingOpts *o, RgStroke **out, RgRingInfo *info)
+{
+    *out = NULL;
+    Rings rs;
+    int r = build_rings(s, o, &rs, info);
+    if (r <= 0)
+        return r;
+    RgStroke *st = calloc(1, sizeof *st);
+    bool ok = st && assemble_rings(&rs, o, o->seam, st);
+    rings_free(&rs);
+    if (!ok) {
+        free(st);
+        return -1;
+    }
+    *out = st;
+    return 1;
+}
+
+/*
+ * A lead-in runs tangent into the first ring, and the ring comes back round
+ * to that same point from the same side, so the two meet at a hair's angle
+ * and may "cross" a fraction of a millimetre from where they join. A lead
+ * that really cuts across the track crosses clear of any end.
+ */
+#define CROSS_NEAR_END 0.5
+
+bool rg_stroke_off_crosses_work(const RgStroke *st)
+{
+    if (!st->off)
+        return false;
+    for (int i = 1; i < st->n; i++) {
+        if (rg_stroke_work_seg(st, i))
+            continue;
+        RgPt a = st->pts[i - 1], b = st->pts[i];
+        for (int j = 1; j < st->n; j++) {
+            double t, u;
+            RgPt c = st->pts[j - 1], d = st->pts[j];
+            if (j == i || !rg_stroke_work_seg(st, j) || !seg_cross(a, b, c, d, &t, &u))
+                continue;
+            RgPt x = { a.x + t * (b.x - a.x), a.y + t * (b.y - a.y) };
+            if (dist(x, a) > CROSS_NEAR_END && dist(x, b) > CROSS_NEAR_END &&
+                dist(x, c) > CROSS_NEAR_END && dist(x, d) > CROSS_NEAR_END)
+                return true;
+        }
+    }
+    return false;
+}
+
+/* xorshift32: the same seams from the same seed on every platform, which
+ * rand() does not promise. */
+static double next_unit(unsigned *state)
+{
+    unsigned x = *state ? *state : 0x9e3779b9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return (x >> 8) / 16777216.0;
+}
+
+/* Whether the gun can come on and leave at `seam` without crossing the passes. */
+static int seam_clear(const Rings *rs, const RgRingOpts *o, RgPt seam)
+{
+    RgStroke st;
+    if (!assemble_rings(rs, o, seam, &st))
+        return -1;
+    bool clear = !rg_stroke_off_crosses_work(&st);
+    free(st.pts);
+    free(st.off);
+    return clear;
+}
+
+int rg_pattern_ring_seams(const RgShape *s, const RgRingOpts *o, int count, unsigned seed,
+                          RgStroke **out, RgRingInfo *info)
+{
+    *out = NULL;
+    if (count < 1 || count > 999) {
+        memset(info, 0, sizeof *info);
+        snprintf(info->why, sizeof info->why, "there must be 1 to 999 seams");
+        return 0;
+    }
+    Rings rs;
+    int r = build_rings(s, o, &rs, info);
+    if (r <= 0)
+        return r;
+
+    /*
+     * Where round the outer edge the gun can step: sampled every so often, and
+     * the seams spread over the places that are clear, so a waist the leads
+     * would cut back across takes no seam and the rest share them evenly.
+     */
+    const RgLoop *edge = &s->loops[o->outer];
+    double perim = ring_len(edge->pts, edge->n);
+    int samples = count * 8 < 96 ? 96 : count * 8;
+    double gap = perim / samples;
+    int *clear = malloc((size_t)samples * sizeof *clear);
+    int *order = malloc((size_t)count * sizeof *order);
+    RgStroke *set = calloc((size_t)count, sizeof *set);
+    int nclear = 0, made = 0, result = -1;
+    if (!clear || !order || !set)
+        goto done;
+    for (int i = 0; i < samples; i++) {
+        int c = seam_clear(&rs, o, ring_at(edge->pts, edge->n, i * gap));
+        if (c < 0)
+            goto done;
+        if (c)
+            clear[nclear++] = i;
+    }
+    if (nclear < count) {
+        if (nclear)
+            snprintf(info->why, sizeof info->why, "there is room round the track for only %d "
+                     "seams where the gun can come on and leave without crossing the passes. "
+                     "Use fewer, or a shorter lead", nclear);
+        else
+            snprintf(info->why, sizeof info->why, "nowhere round the track can the gun come on "
+                     "and leave without crossing the passes: try a shorter lead");
+        result = 0;
+        goto done;
+    }
+
+    unsigned state = seed;
+    for (int k = 0; k < count; k++)
+        order[k] = k;
+    for (int k = count - 1; k > 0; k--) {         /* Fisher-Yates */
+        int j = (int)(next_unit(&state) * (k + 1));
+        int tmp = order[k];
+        order[k] = order[j];
+        order[j] = tmp;
+    }
+    for (; made < count; made++) {
+        /* A clear sample in the middle half of this version's share of them,
+         * so no two seams are nearer than half a share, then a random point
+         * within a sample's spacing of it, if that is clear too. */
+        int lo = order[made] * nclear / count, hi = (order[made] + 1) * nclear / count;
+        int pick = clear[lo + (int)((0.25 + 0.5 * next_unit(&state)) * (hi - lo))];
+        double at = (pick + next_unit(&state) - 0.5) * gap;
+        RgPt seam = ring_at(edge->pts, edge->n, fmod(at + perim, perim));
+        int c = seam_clear(&rs, o, seam);
+        if (c < 0)
+            goto done;
+        if (!c)
+            seam = ring_at(edge->pts, edge->n, pick * gap);
+        if (!assemble_rings(&rs, o, seam, &set[made]))
+            goto done;
+        set[made].cycle = made + 1;
+    }
+    *out = set;
+    set = NULL;
+    result = count;
+
+done:
+    if (set)
+        rg_strokes_free(set, made);
+    free(order);
+    free(clear);
+    rings_free(&rs);
     return result;
 }

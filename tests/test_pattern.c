@@ -414,6 +414,95 @@ static void test_rings(void)
     rg_drawing_free(&d);
 }
 
+/* How far round a closed loop, from its first point, the point on it nearest p lies. */
+static double along_loop(const RgLoop *l, RgPt p)
+{
+    double best = 1e300, at = 0.0, run = 0.0;
+    for (int k = 0; k < l->n; k++) {
+        RgPt a = l->pts[k], b = l->pts[(k + 1) % l->n];
+        double dx = b.x - a.x, dy = b.y - a.y, len = hypot(dx, dy);
+        double t = len > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / (len * len) : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        double d = hypot(a.x + t * dx - p.x, a.y + t * dy - p.y);
+        if (d < best) {
+            best = d;
+            at = run + t * len;
+        }
+        run += len;
+    }
+    return at;
+}
+
+/*
+ * A seam that moves from cycle to cycle: one version of the rings each cycle,
+ * each stepping somewhere else, never two in the same stretch of the track.
+ */
+static void test_ring_seams(void)
+{
+    char out_e[1024], in_e[1024], both[2048];
+    snprintf(both, sizeof both, "%s%s", stadium(out_e, sizeof out_e, 100),
+             stadium(in_e, sizeof in_e, 80));
+    RgDrawing d;
+    RgShape s;
+    int skipped;
+    CHECK(drawing_of(both, &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+    int o = fabs(rg_loop_area(&s.loops[0])) > fabs(rg_loop_area(&s.loops[1])) ? 0 : 1;
+    const RgLoop *edge = &s.loops[o];
+    double perim = 0.0;
+    for (int k = 0; k < edge->n; k++)
+        perim += hypot(edge->pts[(k + 1) % edge->n].x - edge->pts[k].x,
+                       edge->pts[(k + 1) % edge->n].y - edge->pts[k].y);
+
+    RgRingOpts opt = { o, 1 - o, 0, 6, 6, 6, 30, 60, { 0, 0 } };
+    RgStroke *st, *again;
+    RgRingInfo info;
+    enum { V = 6 };
+    int n = rg_pattern_ring_seams(&s, &opt, V, 42, &st, &info);
+    CHECK(n == V);
+    CHECK(info.rings == 7);
+    if (n == V) {
+        bool bins[V] = { false }, numbered = true, clean = true;
+        for (int k = 0; k < V; k++) {
+            numbered = numbered && st[k].cycle == k + 1;
+            clean = clean && !stroke_crosses_itself(&st[k]) && !rg_stroke_off_crosses_work(&st[k]);
+            int bin = (int)(along_loop(edge, st[k].pts[1]) / perim * V);
+            if (bin >= 0 && bin < V)
+                bins[bin] = true;
+        }
+        CHECK(numbered);
+        CHECK(clean);
+        bool spread = true;
+        for (int k = 0; k < V; k++)
+            spread = spread && bins[k];
+        CHECK(spread);                            /* one seam in every stretch */
+
+        /* the same seed, the same seams; another seed, others */
+        CHECK(rg_pattern_ring_seams(&s, &opt, V, 42, &again, &info) == V);
+        CHECK(again[3].n == st[3].n &&
+              memcmp(again[3].pts, st[3].pts, (size_t)st[3].n * sizeof *st[3].pts) == 0);
+        rg_strokes_free(again, V);
+        CHECK(rg_pattern_ring_seams(&s, &opt, V, 7, &again, &info) == V);
+        CHECK(hypot(again[0].pts[1].x - st[0].pts[1].x, again[0].pts[1].y - st[0].pts[1].y) > 1.0);
+        rg_strokes_free(again, V);
+        rg_strokes_free(st, V);
+    }
+    CHECK(rg_pattern_ring_seams(&s, &opt, 0, 1, &st, &info) == 0);
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+
+    /* A run-out that cuts back across the pass, and one that stays clear. */
+    RgPt p[] = { { 50, 10 }, { 50, -10 }, { 0, -10 }, { 0, 0 }, { 100, 0 } };
+    unsigned char off[] = { 1, 0, 0, 0, 0 };
+    RgStroke cut = { p, 5, off, 0 };
+    CHECK(rg_stroke_off_crosses_work(&cut));
+    p[0].y = -20;
+    CHECK(!rg_stroke_off_crosses_work(&cut));
+    off[4] = 1;                                   /* off crossing off coats nothing twice */
+    p[0].y = 10;
+    CHECK(!rg_stroke_off_crosses_work(&cut));
+}
+
 static void test_fill(void)
 {
     char a[512], b[512], both[1024];
@@ -494,5 +583,6 @@ TEST_MAIN("test_pattern",
     test_fill();
     test_fill_runout();
     test_rings();
+    test_ring_seams();
     test_spiral();
 )
