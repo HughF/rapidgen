@@ -41,7 +41,7 @@ the direction are the program. Tools:
 | Select | S | Pick a stroke; drag to move round, scroll to zoom, Home to fit |
 | Line | L | Click points; they snap to the drawing's corners and lines (Shift to place one freely). Double-click or Enter finishes, Backspace takes one back, Escape cancels |
 | Draw | D | Freehand; thinned to the points that matter when you let go |
-| Trace | T | Click near an outline: once round it from that point, inset by the amount set. **Half the width** latches, holding the inset at half the spot |
+| Trace | T | Click near an outline: once round it from that point, inset by the amount set. **Half the width** latches, holding the inset at half the spot. **Cover a track...** opens the track wizard (below) |
 | Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart, turning round off the work. Previewed as you hover |
 | Scale | M | Click two points a known distance apart, then type the true distance |
 
@@ -94,6 +94,39 @@ is driven round, with no square turn at the end of a pass. Rings stop when one
 would collapse in on itself, and a region with a hole in it is refused rather
 than spiralled, because a ring would run straight across the hole. The zig-zag
 fill is still there for parts that suit it.
+
+A **track** - a closed band between two edges, like a seal face - has its own
+wizard, opened from the Trace tool with **Cover a track...**. Click the outer
+edge, then the inner edge (or type the track's width), then set how far
+outside the outer edge the first pass runs, how far past the inner edge the
+last one runs, the step-over, the drift and the lead. The preview follows every
+change - `examples/seal-track.dxf` is a track to try it on. The passes are
+spaced evenly, no further apart than the step-over, and
+each follows whichever edge is nearer. The gun holds the spray speed on every
+pass, and drifts from one pass to the next over the drift distance instead of
+jumping. It comes on along a lead-in tangent to the first pass and leaves into
+the middle, both off the work.
+
+![The track wizard's last step on the example figure-of-eight seal track: seven passes from outside the outer edge to past the inner one, and six seams, one a cycle, spread round the track](docs/screenshots/track-wizard.png)
+
+Where the gun steps across - the seam - can be the **same place** every cycle
+(click near the track to move it), or a **new place each cycle**. The wizard
+warns when a lead-in or run-out would cut back across the passes, as it does
+at the waist of a figure-of-eight, and moving seams are never put there. A
+new place each cycle writes one version of the path per cycle, which the
+program picks by the cycle's number:
+
+```
+cycle_stroke = 1 : -92.936 118.672 | -136.486 65.799  -141.211 60.062  ...  -126.016 19.628 | -60.461 -0.244
+cycle_stroke = 2 : 41.531 -122.66 | 102.554 -91.541  110.337 -87.572  ...  111.062 -46.254 | 61.496 1.027
+```
+
+Each version is a whole path, so the program grows with them. On the
+figure-of-eight track in `examples/seal-track.dxf`, with 7 passes, 6 seams
+made a 393 KB program where one made 127 KB, even with the points they share
+written only once. Check the
+size against the controller's memory before choosing many. A job holds one
+set of moving seams.
 
 Because the robot does not switch the torch, the gun comes onto the work
 already spraying and leaves it still spraying. Stretches of a stroke can be

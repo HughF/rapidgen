@@ -3,6 +3,55 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
+## [Unreleased]
+
+### Added
+
+- **Cover a track.** A wizard, from the Trace tool, for a closed track - a
+  band between two edges, like a seal face - covered by passes driven round
+  it. Step 1: click the outer edge. Step 2: click the inner edge, or type the
+  track's width. Step 3: how far outside the outer edge the first pass runs,
+  how far past the inner edge the last one runs, the step-over, the drift and
+  the lead, previewed on the drawing as they change. The passes are spaced
+  evenly, no further apart than the step-over, and each follows whichever
+  edge is nearer, so a track that narrows is followed on both sides. The gun
+  holds the spray speed on every pass, so the shorter inner passes take less
+  time. It moves from one pass to the next by drifting across over a set
+  distance rather than jumping, comes on along a lead-in tangent to the first
+  pass and leaves along a run-out into the middle, both off the work. Create
+  adds the path; changing anything and pressing Replace swaps it.
+- **A seam that moves each cycle.** In the wizard the gun can step across at
+  the same place every cycle - click near the track to move it - or at a new
+  place each cycle. A new place each cycle writes one version of the path per
+  cycle, up to 8 by default, spread round the track at random but never two
+  together, and never where the lead-in or run-out would cut back across the
+  passes (the waist of a figure-of-eight). Shuffle picks other places. In the
+  job file each version is a `cycle_stroke = k : ...` line, and the program
+  chooses one by the cycle's number with `TEST ... CASE`. Points the versions
+  share are written once. The Seams row of the report counts them; deleting
+  or reversing one version does the whole set.
+- **An example track**, `examples/seal-track.dxf`: a figure-of-eight seal
+  face on a plate, to try the wizard on.
+- **Entities drawn twice over are ignored** when a drawing's outlines are
+  joined, in either direction. Copies had made the joiner close tiny slivers
+  and lose the real outlines, so a track's inner edge could not be clicked.
+  The drawing panel counts them.
+
+### Fixed
+
+- **Save forgot the job's file.** Saving a job that already had a file wrote
+  it correctly, then left the editor with no file name: the drawing, found
+  relative to the job, stopped loading, and the next Save asked where to save.
+  In every release so far.
+- **Reopening the last job worked once.** Opening it at start-up also emptied
+  the remembered path, and opening a job from the Recent list could remember
+  the wrong one.
+- **A run-out made exactly as long as the gun needs was warned as too short**
+  once saved: the job file keeps points to 0.001 mm, and the check allowed no
+  rounding at all.
+- **The command line read a flat part's drawing strictly**, so one entity the
+  editor would skip lost the outline checks altogether.
+
 ## [2026.09.16.4] — alpha, coming on and off the work
 
 ### Added
