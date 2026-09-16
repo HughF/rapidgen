@@ -273,6 +273,13 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
         const char *zone = m->zone == RG_Z_FINE ? "fine" : m->zone == RG_Z_SMALL ? "z1" : "z10";
         if (!loop && m->cycle > 1)
             continue;
+        /* before any TEST: the cycle's number chooses the variant */
+        if (loop && i == 1) {
+            char n[32];
+            rg_buf_printf(out, "    ! %s cycles, building the coating up\n",
+                          rg_fmt(n, sizeof n, (double)pl->cycles, 0));
+            rg_buf_printf(out, "    FOR nCycle FROM 1 TO %d DO\n", pl->cycles);
+        }
         /*
          * Variants: one is sprayed each cycle, chosen by the cycle's number,
          * so a track's seam moves from cycle to cycle. Their targets are the
@@ -284,12 +291,6 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
             if (prev_cycle == 0)
                 rg_buf_printf(out, "      TEST (nCycle - 1) MOD %d + 1\n", pl->variants);
             rg_buf_printf(out, "      CASE %d:\n", m->cycle);
-        }
-        if (loop && i == 1) {
-            char n[32];
-            rg_buf_printf(out, "    ! %s cycles, building the coating up\n",
-                          rg_fmt(n, sizeof n, (double)pl->cycles, 0));
-            rg_buf_printf(out, "    FOR nCycle FROM 1 TO %d DO\n", pl->cycles);
         }
         if (loop && m->kind == RG_MV_HOME && i > 0) {
             if (j->dwell > 0.0) {

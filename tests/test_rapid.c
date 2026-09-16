@@ -337,6 +337,41 @@ static void test_variant_program(void)
     rg_plan_free(&pl1);
     rg_job_free(&j1);
 
+    /* The seams as the job's only strokes: the TEST opens inside the FOR,
+     * not before it, or the program is not RAPID at all. */
+    {
+        char bare[sizeof text - 128];
+        const char *src = rg_job_template_flat();
+        size_t k = 0;
+        while (*src && k + 1 < sizeof bare) {
+            const char *nl = strchr(src, '\n');
+            size_t len = nl ? (size_t)(nl - src) + 1 : strlen(src);
+            if (strncmp(src, "stroke", 6) != 0 && k + len < sizeof bare) {
+                memcpy(bare + k, src, len);
+                k += len;
+            }
+            src += len;
+        }
+        bare[k] = '\0';
+        snprintf(text, sizeof text, "%s\ncycle_stroke = 1 : 100 200  400 200  400 230\n"
+                 "cycle_stroke = 2 : 100 200  400 200  400 240\n", bare);
+        RgJob jb;
+        rg_job_default(&jb);
+        CHECK(rg_job_parse(&jb, text, err, sizeof err) && rg_job_validate(&jb, err, sizeof err));
+        RgPlan pb;
+        CHECK(rg_plan_build(&jb, NULL, &pb));
+        RgBuf bb;
+        rg_buf_init(&bb);
+        CHECK(rg_rapid_write(&jb, &pb, "v.rgj", "2026-09-16 12:00", &bb, err, sizeof err));
+        const char *o = bb.s ? bb.s : "", *fo = strstr(o, "FOR nCycle"), *to = strstr(o, "TEST (");
+        const char *eo = strstr(o, "ENDTEST"), *efo = strstr(o, "ENDFOR");
+        CHECK(fo && to && eo && efo && fo < to && to < eo && eo < efo);
+        CHECK(strstr(o, "! Flat part: 1 stroke a cycle") != NULL);
+        rg_buf_free(&bb);
+        rg_plan_free(&pb);
+        rg_job_free(&jb);
+    }
+
     /* One cycle: only the first variant is written, and no TEST at all. */
     rg_buf_free(&b);
     rg_plan_free(&pl);
