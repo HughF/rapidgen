@@ -315,7 +315,49 @@ static void test_tabs(void)
     rg_job_free(&j);
 }
 
+/* A track whose seam moves each cycle: one stroke for each, chosen by cycle. */
+static void test_cycle_strokes(void)
+{
+    char text[8192];
+    snprintf(text, sizeof text, "%s\n"
+             "cycle_stroke = 1 : -60 0 | 0 0  100 0  100 50 | 160 50\n"
+             "cycle_stroke = 2 : -60 50 | 0 50  100 50  100 0 | 160 0\n", rg_job_template_flat());
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err) && rg_job_validate(&j, err, sizeof err));
+    CHECK(j.nstrokes == 4 && rg_job_variants(&j) == 2);
+    CHECK(j.strokes[0].cycle == 0 && j.strokes[2].cycle == 1 && j.strokes[3].cycle == 2);
+    CHECK(j.strokes[3].off && j.strokes[3].off[0] && !j.strokes[3].off[1]);
+    RgJob copy;
+    CHECK(rg_job_copy(&copy, &j));
+    CHECK(copy.strokes[3].cycle == 2);
+    rg_job_free(&copy);
+    rg_job_free(&j);
+    round_trip(text);
+
+    /* Out of order, or not one after another: refused, with the reason. */
+    snprintf(text, sizeof text, "%s\ncycle_stroke = 2 : 0 0  100 0\ncycle_stroke = 1 : 0 0  100 0\n",
+             rg_job_template_flat());
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err));
+    CHECK(!rg_job_validate(&j, err, sizeof err));
+    CHECK(strstr(err, "cycle_stroke 2 is out of place") != NULL);
+    rg_job_free(&j);
+    snprintf(text, sizeof text, "%s\ncycle_stroke = 1 : 0 0  100 0\nstroke = 0 9  100 9\n"
+             "cycle_stroke = 2 : 0 0  100 0\n", rg_job_template_flat());
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err));
+    CHECK(!rg_job_validate(&j, err, sizeof err));
+    rg_job_free(&j);
+
+    rg_job_default(&j);
+    CHECK(!rg_job_parse(&j, "cycle_stroke = 0 0  100 0\n", err, sizeof err));
+    CHECK(strstr(err, "the cycle it is for") != NULL);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_job",
+    test_cycle_strokes();
     test_tabs();
     test_template();
     test_errors();

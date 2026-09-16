@@ -92,6 +92,10 @@ typedef struct {
     RgPt          *pts;
     int            n;
     unsigned char *off;
+    int            cycle;   /* 0: sprayed every cycle. k: one of a set of
+                               variants, of which cycle c sprays the
+                               ((c - 1) mod set) + 1-th - a track whose seam
+                               moves each cycle */
 } RgStroke;
 
 /* Whether point k of a stroke lies off the work. */
@@ -197,6 +201,9 @@ bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n);
 /* ...with some of it off the work (see RgStroke). `off` may be NULL. A stroke
  * with no work on it at all is not believed, and is kept as all work. */
 bool rg_job_add_stroke_off(RgJob *j, const RgPt *pts, int n, const unsigned char *off);
+
+/* How many per-cycle variants the job's strokes carry: 0 for none. */
+int rg_job_variants(const RgJob *j);
 void rg_job_delete_stroke(RgJob *j, int index);
 
 /* Parse a job file's text over a job (normally defaulted first). The error

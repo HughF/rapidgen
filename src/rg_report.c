@@ -89,8 +89,10 @@ static void flat(RgBuf *b, const RgJob *j, const RgPlan *pl)
 {
     rg_buf_printf(b, "Part        flat; the drawing's origin is at [%.1f, %.1f, %.1f] in the\n"
                      "            robot base frame\n", j->plane.x, j->plane.y, j->plane.z);
-    rg_buf_printf(b, "Strokes     %d, %.0f mm a cycle, at %.0f mm/s\n", j->nstrokes,
+    rg_buf_printf(b, "Strokes     %d, %.0f mm a cycle, at %.0f mm/s\n", pl->strokes_a_cycle,
                   pl->stroke_length, pl->spray_speed);
+    if (pl->variants > 1)
+        rg_buf_printf(b, "Seams       %d positions, a different one each cycle\n", pl->variants);
     if (pl->circuits && pl->laps > 1)
         rg_buf_printf(b, "Circuits    %d closed path%s, driven round %d times without the gun "
                          "leaving the work\n", pl->circuits, pl->circuits == 1 ? "" : "s",

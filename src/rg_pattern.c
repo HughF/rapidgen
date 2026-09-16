@@ -286,6 +286,7 @@ static bool strokes_take(Strokes *list, Pts *v, double ca, double sa)
         list->s[list->n].off = NULL;
         free(v->off);
     }
+    list->s[list->n].cycle = 0;
     list->n++;
     v->p = NULL;
     v->off = NULL;

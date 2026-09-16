@@ -122,8 +122,18 @@ bool rg_job_add_stroke_off(RgJob *j, const RgPt *pts, int n, const unsigned char
     s[j->nstrokes].pts = copy;
     s[j->nstrokes].n = n;
     s[j->nstrokes].off = flags;
+    s[j->nstrokes].cycle = 0;
     j->nstrokes++;
     return true;
+}
+
+int rg_job_variants(const RgJob *j)
+{
+    int v = 0;
+    for (int i = 0; i < j->nstrokes; i++)
+        if (j->strokes[i].cycle > v)
+            v = j->strokes[i].cycle;
+    return v;
 }
 
 bool rg_job_add_stroke(RgJob *j, const RgPt *pts, int n)
@@ -148,11 +158,14 @@ bool rg_job_copy(RgJob *dst, const RgJob *src)
     dst->strokes = NULL;
     dst->nstrokes = 0;
     for (int i = 0; i < src->nstrokes; i++)
+    {
         if (!rg_job_add_stroke_off(dst, src->strokes[i].pts, src->strokes[i].n,
                                    src->strokes[i].off)) {
             rg_job_free(dst);
             return false;
         }
+        dst->strokes[dst->nstrokes - 1].cycle = src->strokes[i].cycle;
+    }
     return true;
 }
 
@@ -177,7 +190,7 @@ double rg_job_step(const RgJob *j)
 
 typedef enum {
     K_IDENT, K_TEXT, K_NUM, K_INT, K_BOOL, K_VEC3, K_QUAT, K_JOINTS, K_BAND,
-    K_START, K_PART, K_STROKE, K_PATTERN, K_GUN
+    K_START, K_PART, K_STROKE, K_CYCLE_STROKE, K_PATTERN, K_GUN
 } KType;
 
 typedef struct {
@@ -268,6 +281,7 @@ static const Key keys[] = {
     { "chord_tolerance", K_NUM,    F(chord_tolerance), 0,               0.01, 5, G_RULES },
 
     { "stroke",          K_STROKE, 0,                  0,               -100000, 100000, G_PAINT },
+    { "cycle_stroke",    K_CYCLE_STROKE, 0,            0,               -100000, 100000, G_PAINT },
 };
 
 #define N_KEYS (sizeof keys / sizeof keys[0])
@@ -337,6 +351,98 @@ static bool numbers(const char *v, double *d, int want)
 static bool in_range(const Key *k, double v)
 {
     return v >= k->lo && v <= k->hi;
+}
+
+/* A stroke's points, and the bars that mark where it is off the work. */
+static bool parse_stroke(RgJob *j, const Key *k, const char *v, int cycle, char *why,
+                         size_t whycap)
+{
+    /*
+     * Bars split a stroke into sections that alternate off the work and
+     * on it, starting and ending off it:
+     *     lead-in | work | turnaround | work | ... | run-out
+     * Any off section may be empty. The robot does not switch the torch,
+     * so these are where the gun comes onto the work, turns round beyond
+     * it, and leaves. With no bars the whole line is work, and the plan
+     * runs its ends on by `lead` itself.
+     */
+    size_t vlen = strlen(v);
+    char *buf = malloc(vlen + 1);
+    if (!buf) {
+        snprintf(why, whycap, "out of memory");
+        return false;
+    }
+    memcpy(buf, v, vlen + 1);
+    int nsect = 1;
+    for (const char *q = buf; *q; q++)
+        nsect += *q == '|';
+    if (nsect > 1 && nsect % 2 == 0) {
+        free(buf);
+        snprintf(why, whycap, "the bars must pair up: lead-in | work | run-out, with "
+                              "turnaround | work for each pass after the first; an end "
+                              "may be empty");
+        return false;
+    }
+
+    RgPt *pts = NULL;
+    unsigned char *off = NULL;
+    int npts = 0, si = 0;
+    bool ok = true;
+    for (char *sec = buf; ok; si++) {
+        char *bar = strchr(sec, '|');
+        if (bar)
+            *bar = '\0';
+        int cnt;
+        double *nums = numbers_all(sec, &cnt);
+        if (cnt < 0) {
+            snprintf(why, whycap, "expected numbers: x y pairs");
+            ok = false;
+        } else if (cnt % 2) {
+            snprintf(why, whycap, "expected x y pairs%s", nsect > 1 ? ", in every section" : "");
+            ok = false;
+        } else if (cnt > 0) {
+            int add = cnt / 2;
+            RgPt *np = realloc(pts, (size_t)(npts + add) * sizeof *np);
+            if (np)
+                pts = np;
+            unsigned char *nf = np ? realloc(off, (size_t)(npts + add)) : NULL;
+            if (nf)
+                off = nf;
+            if (!np || !nf) {
+                snprintf(why, whycap, "out of memory");
+                ok = false;
+            }
+            for (int p = 0; ok && p < add; p++, npts++) {
+                pts[npts].x = nums[2 * p];
+                pts[npts].y = nums[2 * p + 1];
+                off[npts] = nsect > 1 && si % 2 == 0;
+                if (!in_range(k, pts[npts].x) || !in_range(k, pts[npts].y)) {
+                    snprintf(why, whycap, "point %d is outside %g to %g", npts + 1, k->lo,
+                             k->hi);
+                    ok = false;
+                }
+            }
+        }
+        free(nums);
+        if (!bar)
+            break;
+        sec = bar + 1;
+    }
+    if (ok && npts < 2) {
+        snprintf(why, whycap, "expected x y pairs, at least two points");
+        ok = false;
+    }
+    if (ok) {
+        ok = rg_job_add_stroke_off(j, pts, npts, nsect > 1 ? off : NULL);
+        if (ok)
+            j->strokes[j->nstrokes - 1].cycle = cycle;
+        else
+            snprintf(why, whycap, "out of memory");
+    }
+    free(pts);
+    free(off);
+    free(buf);
+    return ok;
 }
 
 static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t whycap)
@@ -489,91 +595,19 @@ static bool set_value(RgJob *j, const Key *k, const char *v, char *why, size_t w
         j->nbands++;
         return true;
 
-    case K_STROKE: {
-        /*
-         * Bars split a stroke into sections that alternate off the work and
-         * on it, starting and ending off it:
-         *     lead-in | work | turnaround | work | ... | run-out
-         * Any off section may be empty. The robot does not switch the torch,
-         * so these are where the gun comes onto the work, turns round beyond
-         * it, and leaves. With no bars the whole line is work, and the plan
-         * runs its ends on by `lead` itself.
-         */
-        size_t vlen = strlen(v);
-        char *buf = malloc(vlen + 1);
-        if (!buf) {
-            snprintf(why, whycap, "out of memory");
+    case K_STROKE:
+        return parse_stroke(j, k, v, 0, why, whycap);
+    case K_CYCLE_STROKE: {
+        char *end;
+        long c = strtol(v, &end, 10);
+        while (*end == ' ' || *end == '\t')
+            end++;
+        if (end == v || *end != ':' || c < 1 || c > 999) {
+            snprintf(why, whycap, "expected the cycle it is for, a colon, then the stroke: "
+                                  "cycle_stroke = 2 : x y  x y ...");
             return false;
         }
-        memcpy(buf, v, vlen + 1);
-        int nsect = 1;
-        for (const char *q = buf; *q; q++)
-            nsect += *q == '|';
-        if (nsect > 1 && nsect % 2 == 0) {
-            free(buf);
-            snprintf(why, whycap, "the bars must pair up: lead-in | work | run-out, with "
-                                  "turnaround | work for each pass after the first; an end "
-                                  "may be empty");
-            return false;
-        }
-
-        RgPt *pts = NULL;
-        unsigned char *off = NULL;
-        int npts = 0, si = 0;
-        bool ok = true;
-        for (char *sec = buf; ok; si++) {
-            char *bar = strchr(sec, '|');
-            if (bar)
-                *bar = '\0';
-            int cnt;
-            double *nums = numbers_all(sec, &cnt);
-            if (cnt < 0) {
-                snprintf(why, whycap, "expected numbers: x y pairs");
-                ok = false;
-            } else if (cnt % 2) {
-                snprintf(why, whycap, "expected x y pairs%s", nsect > 1 ? ", in every section" : "");
-                ok = false;
-            } else if (cnt > 0) {
-                int add = cnt / 2;
-                RgPt *np = realloc(pts, (size_t)(npts + add) * sizeof *np);
-                if (np)
-                    pts = np;
-                unsigned char *nf = np ? realloc(off, (size_t)(npts + add)) : NULL;
-                if (nf)
-                    off = nf;
-                if (!np || !nf) {
-                    snprintf(why, whycap, "out of memory");
-                    ok = false;
-                }
-                for (int p = 0; ok && p < add; p++, npts++) {
-                    pts[npts].x = nums[2 * p];
-                    pts[npts].y = nums[2 * p + 1];
-                    off[npts] = nsect > 1 && si % 2 == 0;
-                    if (!in_range(k, pts[npts].x) || !in_range(k, pts[npts].y)) {
-                        snprintf(why, whycap, "point %d is outside %g to %g", npts + 1, k->lo,
-                                 k->hi);
-                        ok = false;
-                    }
-                }
-            }
-            free(nums);
-            if (!bar)
-                break;
-            sec = bar + 1;
-        }
-        if (ok && npts < 2) {
-            snprintf(why, whycap, "expected x y pairs, at least two points");
-            ok = false;
-        }
-        if (ok) {
-            ok = rg_job_add_stroke_off(j, pts, npts, nsect > 1 ? off : NULL);
-            if (!ok)
-                snprintf(why, whycap, "out of memory");
-        }
-        free(pts);
-        free(off);
-        free(buf);
-        return ok;
+        return parse_stroke(j, k, end + 1, (int)c, why, whycap);
     }
     }
     return false;
@@ -726,9 +760,14 @@ static void write_key(RgBuf *b, const RgJob *j, const Key *k)
         }
         return;
     case K_STROKE:
+    case K_CYCLE_STROKE:
         for (int i = 0; i < j->nstrokes; i++) {
             const RgStroke *st = &j->strokes[i];
+            if ((st->cycle > 0) != (k->type == K_CYCLE_STROKE))
+                continue;
             rg_buf_printf(b, "%-15s =", k->key);
+            if (st->cycle > 0)
+                rg_buf_printf(b, " %d :", st->cycle);
             /* A bar wherever the stroke goes onto or off the work. Sections
              * start and end off it, so an end that is work gets an empty
              * section before or after it. */
@@ -759,7 +798,7 @@ void rg_job_write(const RgJob *j, RgBuf *b)
         const Key *k = &keys[i];
         bool cyl_only = k->group == G_CYL || k->type == K_BAND || k->type == K_START ||
                         strcmp(k->key, "coats") == 0 || strcmp(k->key, "wrap_tolerance") == 0;
-        bool flat_only = k->group == G_FLAT || k->type == K_STROKE ||
+        bool flat_only = k->group == G_FLAT || k->type == K_STROKE || k->type == K_CYCLE_STROKE ||
                          strcmp(k->key, "lead") == 0 || strcmp(k->key, "laps") == 0;
         bool fan_only = strcmp(k->key, "fan_width") == 0 || strcmp(k->key, "fan_along") == 0;
         bool spot_only = strcmp(k->key, "spot_diameter") == 0;
@@ -767,8 +806,13 @@ void rg_job_write(const RgJob *j, RgBuf *b)
             continue;
         if ((cyl_only && j->part != RG_PART_CYLINDER) || (flat_only && j->part != RG_PART_FLAT))
             continue;
-        if (k->type == K_STROKE && j->nstrokes == 0)
-            continue;
+        if (k->type == K_STROKE || k->type == K_CYCLE_STROKE) {
+            bool any = false;
+            for (int s = 0; s < j->nstrokes && !any; s++)
+                any = (j->strokes[s].cycle > 0) == (k->type == K_CYCLE_STROKE);
+            if (!any)
+                continue;
+        }
         if (k->group != group) {
             group = k->group;
             rg_buf_printf(b, "\n# ---- %s\n", group);
@@ -828,6 +872,18 @@ bool rg_job_validate(const RgJob *j, char *err, size_t errcap)
         NEED(!missing(j->spray_speed), "spray_speed is required: the gun's speed along a "
                                        "stroke, in mm/s");
         NEED(j->nstrokes > 0, "there are no strokes: paint the pattern to spray");
+        /* A set of per-cycle variants is one unbroken run numbered from 1,
+         * or the program could not tell which to spray on which cycle. */
+        for (int i = 0, first = -1, count = 0; i < j->nstrokes; i++) {
+            if (j->strokes[i].cycle <= 0)
+                continue;
+            if (first < 0)
+                first = i;
+            NEED(i == first + count && j->strokes[i].cycle == count + 1,
+                 "cycle_stroke %d is out of place: the strokes for each cycle must follow one "
+                 "another, numbered 1, 2, 3 and so on", j->strokes[i].cycle);
+            count++;
+        }
     }
 
     if (j->pattern == RG_PAT_SPOT)

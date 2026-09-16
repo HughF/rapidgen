@@ -688,7 +688,41 @@ static void test_outline(void)
     rg_drawing_free(&d);
 }
 
+/* Variants: each cycle sprays one, so the figures are for one cycle. */
+static void test_variants(void)
+{
+    RgJob j;
+    RgPlan pl;
+    flat_with(&j, "cycle_stroke = 1 : 100 200  400 200\ncycle_stroke = 2 : 100 210  400 210\n"
+                  "cycle_stroke = 3 : 100 220  400 220");
+    rg_job_delete_stroke(&j, 0);
+    rg_job_delete_stroke(&j, 0);
+    bool ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+    CHECK(pl.variants == 3 && pl.strokes_a_cycle == 1);
+    CHECK_NEAR(pl.stroke_length, 300.0, 1e-9);                /* one of them, not three */
+    CHECK_NEAR(pl.cycle_time, (300.0 + 2 * pl.lead_used) / 300.0, 1e-6);
+    int tagged[4] = { 0, 0, 0, 0 };
+    for (int i = 0; i < pl.nmoves; i++)
+        if (pl.moves[i].cycle >= 0 && pl.moves[i].cycle <= 3)
+            tagged[pl.moves[i].cycle]++;
+    CHECK(tagged[1] > 0 && tagged[1] == tagged[2] && tagged[2] == tagged[3]);
+    CHECK(!has_issue(&pl, RG_NOTE, "never sprayed"));          /* 6 cycles, 3 seams */
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    flat_with(&j, "cycles = 2\ncycle_stroke = 1 : 100 200  400 200\n"
+                  "cycle_stroke = 2 : 100 210  400 210\ncycle_stroke = 3 : 100 220  400 220");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(has_issue(&pl, RG_NOTE, "3 seam positions but only 2 cycles"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_plan",
+    test_variants();
     test_outline();
     test_tabs();
     test_template_plan();

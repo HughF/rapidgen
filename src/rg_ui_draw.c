@@ -661,12 +661,29 @@ static void update_fill_preview(RgUi *ui)
     memcpy(ui->preview_key, key, sizeof key);
 }
 
+/*
+ * Of a set of per-cycle variants only one is drawn and can be picked: the
+ * selected one, or else the first. Eight near-identical tracks on top of one
+ * another would hide each other and the drawing.
+ */
+static bool stroke_shown(const RgUi *ui, int s)
+{
+    const RgJob *j = &ui->job;
+    int c = j->strokes[s].cycle;
+    if (c == 0)
+        return true;
+    int sel = ui->selected >= 0 && ui->selected < j->nstrokes ? j->strokes[ui->selected].cycle : 0;
+    return sel > 0 ? c == sel : c == 1;
+}
+
 static int stroke_at(const RgUi *ui, RgPt p, double radius)
 {
     int best = -1;
     double bd = radius;
     for (int s = 0; s < ui->job.nstrokes; s++) {
         const RgStroke *st = &ui->job.strokes[s];
+        if (!stroke_shown(ui, s))
+            continue;
         for (int k = 1; k < st->n; k++) {
             double d = seg_dist(p, st->pts[k - 1], st->pts[k]);
             if (d <= bd) {
@@ -839,7 +856,8 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
      * overlapping passes merge into one area, and the outline has to stay
      * visible through it. */
     for (int s = 0; s < ui->job.nstrokes; s++)
-        draw_stroke_band(ui, cb, &ui->job.strokes[s], s == ui->selected);
+        if (stroke_shown(ui, s))
+            draw_stroke_band(ui, cb, &ui->job.strokes[s], s == ui->selected);
 
     if (ui->have_raw) {
         for (int i = 0; i < ui->drawing.n; i++)
@@ -868,7 +886,8 @@ static void canvas_paint(RgUi *ui, struct nk_rect r)
         draw_path(ui, cb, &ui->preview[i], S(ui, 1.3f), alpha(t->trace_a, 150), false);
 
     for (int s = 0; s < ui->job.nstrokes; s++)
-        draw_stroke(ui, cb, &ui->job.strokes[s], s, s == ui->selected, s == ui->hover_stroke);
+        if (stroke_shown(ui, s))
+            draw_stroke(ui, cb, &ui->job.strokes[s], s, s == ui->selected, s == ui->hover_stroke);
 
     if (ui->ndraft) {
         polyline(ui, cb, ui->draft, ui->ndraft, false, S(ui, 2.0f), t->accent);
@@ -1168,6 +1187,29 @@ static void reverse_stroke(RgStroke *st)
     }
 }
 
+/* A variant is one of a set: deleting or reversing it does the whole set, or
+ * the set is left broken and the job no longer validates. */
+static void delete_stroke_or_set(RgUi *ui, int s)
+{
+    RgJob *j = &ui->job;
+    if (j->strokes[s].cycle > 0) {
+        for (int i = j->nstrokes - 1; i >= 0; i--)
+            if (j->strokes[i].cycle > 0)
+                rg_job_delete_stroke(j, i);
+    } else {
+        rg_job_delete_stroke(j, s);
+    }
+    ui->selected = -1;
+}
+
+static void reverse_stroke_or_set(RgUi *ui, int s)
+{
+    RgJob *j = &ui->job;
+    for (int i = 0; i < j->nstrokes; i++)
+        if (i == s || (j->strokes[s].cycle > 0 && j->strokes[i].cycle > 0))
+            reverse_stroke(&j->strokes[i]);
+}
+
 static void swap_strokes(RgJob *j, int a, int b)
 {
     RgStroke tmp = j->strokes[a];
@@ -1188,12 +1230,18 @@ static void inspect_strokes(RgUi *ui)
     nk_layout_row_dynamic(c, S(ui, 170), 1);
     if (nk_group_begin(c, "strokes", NK_WINDOW_BORDER)) {
         double total = 0.0;
+        int variants = rg_job_variants(j);
         for (int i = 0; i < j->nstrokes; i++) {
             const RgStroke *st = &j->strokes[i];
             double len = rg_stroke_length(st->pts, st->n);
-            total += len;
+            /* a cycle sprays one variant: each counts for its share */
+            total += st->cycle > 0 && variants > 0 ? len / variants : len;
             char lab[96];
-            snprintf(lab, sizeof lab, "%3d    %4d pts    %7.0f mm", i + 1, st->n, len);
+            if (st->cycle > 0)
+                snprintf(lab, sizeof lab, "%3d    %4d pts    %7.0f mm   seam %d of %d", i + 1,
+                         st->n, len, st->cycle, variants);
+            else
+                snprintf(lab, sizeof lab, "%3d    %4d pts    %7.0f mm", i + 1, st->n, len);
             nk_layout_row_dynamic(c, S(ui, 22), 1);
             nk_bool on = ui->selected == i;
             if (nk_selectable_label(c, lab, NK_TEXT_LEFT, &on))
@@ -1204,7 +1252,7 @@ static void inspect_strokes(RgUi *ui)
             nk_label_colored(c, "None yet.", NK_TEXT_LEFT, t->text_faint);
         } else if (!isnan(j->spray_speed) && j->spray_speed > 0) {
             char lab[96];
-            snprintf(lab, sizeof lab, "%.0f mm in all, %.0f s at %.0f mm/s", total,
+            snprintf(lab, sizeof lab, "%.0f mm a cycle, %.0f s at %.0f mm/s", total,
                      total / j->spray_speed, j->spray_speed);
             nk_layout_row_dynamic(c, S(ui, 22), 1);
             nk_label_colored(c, lab, NK_TEXT_LEFT, t->text_dim);
@@ -1215,20 +1263,24 @@ static void inspect_strokes(RgUi *ui)
     int s = ui->selected;
     bool have = s >= 0 && s < j->nstrokes;
     button_row(ui, 4);
-    if (button(ui, "Up", "Spray this stroke earlier", have && s > 0)) {
+    /* moving a variant, or past one, would split the set */
+    bool movable = have && j->strokes[s].cycle == 0;
+    if (button(ui, "Up", "Spray this stroke earlier",
+               movable && s > 0 && j->strokes[s - 1].cycle == 0)) {
         swap_strokes(j, s, s - 1);
         ui->selected = s - 1;
     }
-    if (button(ui, "Down", "Spray this stroke later", have && s + 1 < j->nstrokes)) {
+    if (button(ui, "Down", "Spray this stroke later",
+               movable && s + 1 < j->nstrokes && j->strokes[s + 1].cycle == 0)) {
         swap_strokes(j, s, s + 1);
         ui->selected = s + 1;
     }
-    if (button(ui, "Reverse", "Spray this stroke the other way round (R)", have))
-        reverse_stroke(&j->strokes[s]);
-    if (button(ui, "Delete", "Remove this stroke (Delete)", have)) {
-        rg_job_delete_stroke(j, s);
-        ui->selected = -1;
-    }
+    if (button(ui, "Reverse", "Spray this stroke the other way round (R). A seam variant "
+               "reverses the whole set", have))
+        reverse_stroke_or_set(ui, s);
+    if (button(ui, "Delete", "Remove this stroke (Delete). A seam variant removes the whole "
+               "set", have))
+        delete_stroke_or_set(ui, s);
     button_row(ui, 1);
     if (button(ui, "Clear all strokes", "Remove every stroke. Undo brings them back", j->nstrokes > 0)) {
         rg_job_free(j);
@@ -1369,8 +1421,7 @@ bool draw_handle_key(RgUi *ui, SDL_Keycode key, Uint16 mod)
         return false;
     case SDLK_DELETE:
         if (have) {
-            rg_job_delete_stroke(&ui->job, s);
-            ui->selected = -1;
+            delete_stroke_or_set(ui, s);
             return true;
         }
         return false;
@@ -1379,7 +1430,7 @@ bool draw_handle_key(RgUi *ui, SDL_Keycode key, Uint16 mod)
         return true;
     case SDLK_r:
         if (have) {
-            reverse_stroke(&ui->job.strokes[s]);
+            reverse_stroke_or_set(ui, s);
             return true;
         }
         return false;

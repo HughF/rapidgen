@@ -64,6 +64,7 @@ typedef struct {
     bool        lap_begin;       /* a lap of a closed path starts here         */
     bool        lap_end;         /* ...and closes on this move                 */
     int         group;           /* the band or stroke; -1 for neither         */
+    int         cycle;           /* 0 every cycle, k one of the variants       */
     char        note[80];        /* a comment written before the move          */
 } RgMove;
 
@@ -88,6 +89,8 @@ struct RgPlan {
     int    cycles;
     int    laps;                /* flat: times round each closed path      */
     int    circuits;            /* flat: strokes driven round as a circuit */
+    int    variants;            /* flat: per-cycle variants, 0 for none    */
+    int    strokes_a_cycle;     /* flat: strokes one cycle sprays          */
     double dwell;               /* seconds between cycles                  */
     double cycle_time;          /* seconds spraying, one cycle             */
     double lead_used;           /* flat: run-on and run-off at each end    */

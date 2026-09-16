@@ -95,8 +95,10 @@ static void test_structure(void)
             t++;
         if (strncmp(t, "PROC ", 5) == 0) { in_proc = true; continue; }
         if (strncmp(t, "ENDPROC", 7) == 0) { in_proc = false; continue; }
-        /* FOR ... DO and ENDFOR are the loop, not statements */
-        if (strncmp(t, "FOR ", 4) == 0 || strncmp(t, "ENDFOR", 6) == 0)
+        /* FOR ... DO, ENDFOR, TEST, CASE and ENDTEST are structure, not statements */
+        if (strncmp(t, "FOR ", 4) == 0 || strncmp(t, "ENDFOR", 6) == 0 ||
+            strncmp(t, "TEST ", 5) == 0 || strncmp(t, "CASE ", 5) == 0 ||
+            strncmp(t, "ENDTEST", 7) == 0)
             continue;
         if (in_proc && *t && *t != '!')
             terminated = terminated && line[n - 1] == ';';
@@ -229,7 +231,7 @@ static void test_flat_program(void)
     rg_buf_init(&b);
     CHECK(rg_rapid_write(&j, &pl, "panel.rgj", "2026-09-15 12:00", &b, err, sizeof err));
     const char *s = b.s ? b.s : "";
-    CHECK(strstr(s, "! Flat part: 2 strokes, 1580 mm at 300 mm/s\n") != NULL);
+    CHECK(strstr(s, "! Flat part: 2 strokes a cycle, 1580 mm at 300 mm/s\n") != NULL);
     CHECK(count(s, "PERS wobjdata wRgPart:=[FALSE,TRUE,\"\",[[800,-300,200],[1,0,0,0]]") == 1);
     CHECK(strstr(s, "wRgCylinder") == NULL);
     CHECK(count(s, "! Stroke 1: 4 points, 1080 mm") == 1);
@@ -291,7 +293,69 @@ static void test_circuit(void)
     rg_job_free(&j);
 }
 
+/*
+ * A seam that moves each cycle: the program chooses a variant by the cycle's
+ * number. Points the variants share are one target, not one each.
+ */
+static void test_variant_program(void)
+{
+    char text[8192];
+    snprintf(text, sizeof text, "%s\n"
+             "cycle_stroke = 1 : 100 200  400 200  400 230\n"
+             "cycle_stroke = 2 : 100 200  400 200  400 240\n", rg_job_template_flat());
+    RgJob j;
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err) && rg_job_validate(&j, err, sizeof err));
+    RgPlan pl;
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    RgBuf b;
+    rg_buf_init(&b);
+    CHECK(rg_rapid_write(&j, &pl, "v.rgj", "2026-09-16 12:00", &b, err, sizeof err));
+    const char *s = b.s ? b.s : "";
+    CHECK(count(s, "TEST (nCycle - 1) MOD 2 + 1") == 1);
+    CHECK(count(s, "CASE 1:") == 1 && count(s, "CASE 2:") == 1);
+    CHECK(count(s, "ENDTEST") == 1);
+    const char *t = strstr(s, "TEST ("), *c1 = strstr(s, "CASE 1:"), *c2 = strstr(s, "CASE 2:"),
+               *e = strstr(s, "ENDTEST"), *f = strstr(s, "FOR nCycle"), *ef = strstr(s, "ENDFOR");
+    CHECK(f && t && c1 && c2 && e && ef && f < t && t < c1 && c1 < c2 && c2 < e && e < ef);
+    CHECK(strstr(s, "! Flat part: 3 strokes a cycle") != NULL);
+    /* the first two points of each variant are the same targets */
+    int targets = count(s, "CONST robtarget pRg");
+    RgBuf one;
+    rg_buf_init(&one);
+    snprintf(text, sizeof text, "%s\ncycle_stroke = 1 : 100 200  400 200  400 230\n",
+             rg_job_template_flat());
+    RgJob j1;
+    rg_job_default(&j1);
+    CHECK(rg_job_parse(&j1, text, err, sizeof err));
+    RgPlan pl1;
+    CHECK(rg_plan_build(&j1, NULL, &pl1));
+    CHECK(rg_rapid_write(&j1, &pl1, "v.rgj", "2026-09-16 12:00", &one, err, sizeof err));
+    int targets1 = count(one.s, "CONST robtarget pRg");
+    CHECK(targets > targets1 && targets < 2 * targets1);
+    rg_buf_free(&one);
+    rg_plan_free(&pl1);
+    rg_job_free(&j1);
+
+    /* One cycle: only the first variant is written, and no TEST at all. */
+    rg_buf_free(&b);
+    rg_plan_free(&pl);
+    snprintf(text, sizeof text, "%s\ncycles = 1\ncycle_stroke = 1 : 100 200  400 200  400 230\n"
+             "cycle_stroke = 2 : 100 200  400 200  400 240\n", rg_job_template_flat());
+    rg_job_free(&j);
+    rg_job_default(&j);
+    CHECK(rg_job_parse(&j, text, err, sizeof err));
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    rg_buf_init(&b);
+    CHECK(rg_rapid_write(&j, &pl, "v.rgj", "2026-09-16 12:00", &b, err, sizeof err));
+    CHECK(b.s && strstr(b.s, "TEST") == NULL && strstr(b.s, "CASE") == NULL);
+    rg_buf_free(&b);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_rapid",
+    test_variant_program();
     test_circuit();
     test_flat_program();
     test_structure();

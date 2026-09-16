@@ -403,6 +403,7 @@ static void build_flat(Ctx *c)
         start->after = RG_ACT_READY;
     for (int s = 0; s < j->nstrokes && !c->oom; s++) {
         const RgStroke *st = &j->strokes[s];
+        int first_move = pl->nmoves;
         Parts pt = stroke_parts(st);
         bool tabs = st->off != NULL;
         RgPt first, last_pt;
@@ -478,6 +479,8 @@ static void build_flat(Ctx *c)
             last->after = RG_ACT_GUN_OFF;
         add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_flat(j, at, j->approach),
                  s, NULL);
+        for (int m = first_move; m < pl->nmoves; m++)
+            pl->moves[m].cycle = st->cycle;
     }
     add_move(c, RG_MV_HOME, RG_SPD_TRAVEL, RG_Z_FINE, no_pose(), -1, "Home");
 }
@@ -858,11 +861,18 @@ static void check_flat(Ctx *c)
          * need them and the checks run first.
          */
         Parts pt = stroke_parts(st);
+        /* Every variant is checked - a bad seam on cycle 3 matters - but a
+         * cycle sprays one of them, so lengths count each for its share, and
+         * counts of things along the path are taken from the first. */
+        double share = st->cycle > 0 && pl->variants > 0 ? 1.0 / pl->variants : 1.0;
+        bool counted = st->cycle <= 1;
+        if (counted)
+            pl->strokes_a_cycle++;
         if (pt.closed)
             pl->circuits++;
         int reps = pt.closed ? pl->laps : 1;
-        pl->off_length += pt.off;
-        if (!pt.closed)
+        pl->off_length += share * pt.off;
+        if (!pt.closed && counted)
             pl->lead_ends += !rg_stroke_off(st, 0) + !rg_stroke_off(st, st->n - 1);
         for (int k = 0; k < st->n; k++) {
             RgPt p = st->pts[k];
@@ -873,7 +883,7 @@ static void check_flat(Ctx *c)
             if (k > 0 && rg_stroke_work_seg(st, k)) {
                 double dx = p.x - st->pts[k - 1].x, dy = p.y - st->pts[k - 1].y;
                 double len = hypot(dx, dy);
-                pl->stroke_length += len * reps;
+                pl->stroke_length += share * len * reps;
                 /* A segment running along the fan paints a line the fan's
                  * thickness, not a band its width. */
                 if (len > 1e-9 && fabs((dx * fx + dy * fy) / len) > cos(30.0 * RG_DEG))
@@ -882,7 +892,8 @@ static void check_flat(Ctx *c)
             /* A corner on the work, or where the work meets a stretch off it,
              * slows the robot on the part. A weave's turnaround, all off the
              * work, does not. */
-            if (sharp_at(st, k) && (rg_stroke_work_seg(st, k) || rg_stroke_work_seg(st, k + 1)))
+            if (counted && sharp_at(st, k) &&
+                (rg_stroke_work_seg(st, k) || rg_stroke_work_seg(st, k + 1)))
                 pl->sharp_corners++;
         }
         /*
@@ -916,6 +927,10 @@ static void check_flat(Ctx *c)
               pl->short_tabs == 1 ? "" : "s", pl->short_tabs == 1 ? "is" : "are",
               pl->lead_needed, pl->spray_speed, j->accel, shortest_stroke + 1, shortest_kind,
               pl->shortest_tab);
+    if (pl->variants > j->cycles)
+        issue(c, RG_NOTE, "there are %d seam positions but only %d cycle%s, so positions %d to %d "
+              "are never sprayed", pl->variants, j->cycles, j->cycles == 1 ? "" : "s",
+              j->cycles + 1, pl->variants);
     if (pl->laps > 1 && pl->circuits > 0 && pl->circuits < j->nstrokes)
         issue(c, RG_NOTE, "the %d lap%s apply only to the %d closed circuit%s; the open strokes "
               "are sprayed once a cycle, so the thickness estimate counts one lap",
@@ -957,7 +972,7 @@ static void check_flat(Ctx *c)
          * not the stroke's drawn end. Testing the drawn end reported a gun
          * that had already left the work as dropping onto it. */
         for (int s = 0; s < j->nstrokes; s++) {
-            if (j->strokes[s].n < 2)
+            if (j->strokes[s].n < 2 || j->strokes[s].cycle > 1)
                 continue;
             const RgStroke *st = &j->strokes[s];
             Parts pa = stroke_parts(st);
@@ -975,11 +990,15 @@ static void check_flat(Ctx *c)
             if (!(judged && (rg_stroke_off(st, st->n - 1) || lo > 0.0)) &&
                 over_part(c, reg, z, px0, py0, px1, py1))
                 pl->transit_drops++;
-            if (s + 1 < j->nstrokes && j->strokes[s + 1].n >= 2) {
-                Parts pb = stroke_parts(&j->strokes[s + 1]);
+            /* the next stroke this cycle: past the other variants */
+            int nx = s + 1;
+            while (nx < j->nstrokes && j->strokes[nx].cycle > 1)
+                nx++;
+            if (nx < j->nstrokes && j->strokes[nx].n >= 2) {
+                Parts pb = stroke_parts(&j->strokes[nx]);
                 RgPt b, bz;
-                stroke_ends(&j->strokes[s + 1], &pb, pl->lead_used, &b, &bz, &li, &lo);
-                int reg_b = c->part ? stroke_region(c->part, &j->strokes[s + 1]) : -1;
+                stroke_ends(&j->strokes[nx], &pb, pl->lead_used, &b, &bz, &li, &lo);
+                int reg_b = c->part ? stroke_region(c->part, &j->strokes[nx]) : -1;
                 /* however much of the hop between strokes passes over the part */
                 double n = 32.0, inside = 0.0;
                 double seg = hypot(b.x - z.x, b.y - z.y) / n;
@@ -1128,6 +1147,7 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     pl->pitch = rg_job_step(job);
     pl->cycles = job->cycles;
     pl->laps = job->laps;
+    pl->variants = rg_job_variants(job);
     pl->dwell = job->dwell;
     pl->passes_per_point = pl->pitch > 0.0 ? width / pl->pitch : 0.0;
     if (c.flat) {
@@ -1187,9 +1207,12 @@ bool rg_plan_build(const RgJob *job, const RgShape *shape, RgPlan *pl)
     for (int i = 1; i < pl->nmoves; i++) {
         if (pl->moves[i].lap_begin)
             reps = pl->laps;
+        /* A cycle sprays one of the variants, so each counts for its share. */
+        double share = pl->moves[i].cycle > 0 && pl->variants > 0 ? 1.0 / pl->variants : 1.0;
         if (pl->moves[i].speed == RG_SPD_SPRAY)
-            pl->cycle_time += reps * rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
-                                                         pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
+            pl->cycle_time += share * reps *
+                              rg_v3_len(rg_v3_sub(pl->moves[i].tcp.pos,
+                                                  pl->moves[i - 1].tcp.pos)) / pl->spray_speed;
         if (pl->moves[i].lap_end)
             reps = 1;
     }

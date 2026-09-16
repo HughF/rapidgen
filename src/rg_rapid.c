@@ -172,6 +172,9 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     }
     for (int i = 0; i < pl->nmoves; i++) {
         index[i] = -1;
+        /* With one cycle only the first variant is ever sprayed. */
+        if (pl->cycles <= 1 && pl->moves[i].cycle > 1)
+            continue;
         if (pl->moves[i].kind != RG_MV_HOME) {
             char text[256];
             robtarget_text(text, sizeof text, &pl->moves[i].tcp, pl->moves[i].cf);
@@ -194,8 +197,9 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     rg_buf_printf(out, "  ! Written by %s %s for an ABB %s\n", RAPIDGEN_NAME, RAPIDGEN_VERSION, d->name);
     rg_buf_printf(out, "  ! From %s, %s\n", source, stamp);
     if (j->part == RG_PART_FLAT) {
-        rg_buf_printf(out, "  ! Flat part: %d stroke%s, %s mm at %s mm/s\n", j->nstrokes,
-                      j->nstrokes == 1 ? "" : "s", rg_fmt(n1, sizeof n1, pl->stroke_length, 0),
+        rg_buf_printf(out, "  ! Flat part: %d stroke%s a cycle, %s mm at %s mm/s\n",
+                      pl->strokes_a_cycle, pl->strokes_a_cycle == 1 ? "" : "s",
+                      rg_fmt(n1, sizeof n1, pl->stroke_length, 0),
                       rg_fmt(n2, sizeof n2, pl->spray_speed, 1));
         rg_buf_printf(out, "  ! %s %s mm at %s mm standoff\n", j->pattern == RG_PAT_FAN ? "Fan" : "Spot",
                       rg_fmt(n1, sizeof n1, rg_job_width(j), 1), rg_fmt(n2, sizeof n2, j->standoff, 1));
@@ -267,6 +271,20 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
     for (int i = 0; i < pl->nmoves; i++) {
         const RgMove *m = &pl->moves[i];
         const char *zone = m->zone == RG_Z_FINE ? "fine" : m->zone == RG_Z_SMALL ? "z1" : "z10";
+        if (!loop && m->cycle > 1)
+            continue;
+        /*
+         * Variants: one is sprayed each cycle, chosen by the cycle's number,
+         * so a track's seam moves from cycle to cycle. Their targets are the
+         * same points wherever the paths agree, so they share names and the
+         * program grows by the path, not by the points.
+         */
+        int prev_cycle = i > 0 ? pl->moves[i - 1].cycle : 0;
+        if (loop && m->cycle > 0 && m->cycle != prev_cycle) {
+            if (prev_cycle == 0)
+                rg_buf_printf(out, "      TEST (nCycle - 1) MOD %d + 1\n", pl->variants);
+            rg_buf_printf(out, "      CASE %d:\n", m->cycle);
+        }
         if (loop && i == 1) {
             char n[32];
             rg_buf_printf(out, "    ! %s cycles, building the coating up\n",
@@ -325,6 +343,8 @@ bool rg_rapid_write(const RgJob *j, const RgPlan *pl, const char *source,
         }
         if (m->lap_end)
             rg_buf_puts(out, "      ENDFOR\n");
+        if (loop && m->cycle > 0 && (i + 1 == pl->nmoves || pl->moves[i + 1].cycle == 0))
+            rg_buf_puts(out, "      ENDTEST\n");
     }
     rg_buf_puts(out, "    ConfJ \\On;\n    ConfL \\On;\n  ENDPROC\nENDMODULE\n");
 
