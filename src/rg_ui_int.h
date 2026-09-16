@@ -132,7 +132,7 @@ struct RgUi {
     int      hover_stroke, hover_loop;
     bool     snap;
     double   smoothing, inset, fill_angle;
-    bool     fill_extend;
+    bool     fill_extend, fill_spiral;
     int      scale_clicks;
     RgPt     scale_a, scale_b;
     double   scale_true, width_true;
@@ -144,7 +144,7 @@ struct RgUi {
     /* the fill tool's preview of the region under the pointer */
     RgStroke *preview;
     int       npreview, preview_loop;
-    double    preview_key[4];
+    double    preview_key[5];   /* pitch, angle, extend, scale, spiral */
 
     float    *scratch;             /* screen points for one polyline */
     int       scratch_cap;

@@ -152,6 +152,68 @@ static void test_lenient(void)
     rg_drawing_free(&d);
 }
 
+/*
+ * A spiral follows the outline inward: one continuous path, so the gun is
+ * driven round the work rather than turned through a square corner at the
+ * end of every pass.
+ */
+static void test_spiral(void)
+{
+    char r[512];
+    RgDrawing d;
+    RgShape s;
+    int skipped = -1;
+    CHECK(drawing_of(rect(r, sizeof r, 0, 0, 100, 100), &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+
+    /* First ring 6 mm in, then every 10 mm: 6, 16, 26, 36, 46 — and 46 is the
+     * last that still holds area in a 100 mm square (the centre is at 50). */
+    RgStroke *st;
+    int n = rg_pattern_spiral(&s, 0, 6, 10, &st);
+    CHECK(n == 1);
+    if (n == 1) {
+        /* Five rings of five points each: four corners and the point that
+         * closes the ring, less the joins that land on each other. */
+        CHECK(st[0].n >= 25);
+        /* It starts on the outermost ring, 6 mm in from the corner it began at. */
+        CHECK_NEAR(st[0].pts[0].x, 6, 1e-9);
+        CHECK_NEAR(st[0].pts[0].y, 6, 1e-9);
+        /* Every point stays inside the outline, and no ring escapes it. */
+        bool inside = true;
+        for (int i = 0; i < st[0].n; i++)
+            inside = inside && rg_loop_contains(&s.loops[0], st[0].pts[i]);
+        CHECK(inside);
+        /* The path works inward: the last point is nearer the centre than the
+         * first, and the whole thing is one stroke, not five. */
+        RgPt a = st[0].pts[0], b = st[0].pts[st[0].n - 1];
+        CHECK(hypot(b.x - 50, b.y - 50) < hypot(a.x - 50, a.y - 50));
+        rg_strokes_free(st, n);
+    }
+
+    /* Too coarse to fit even one ring inside: nothing, rather than a ring
+     * folded through the middle. An inset of 60 on a 100 mm square offsets
+     * to a tidy 20 mm square that is the right way round and smaller than
+     * its parent — it is only caught by standing every point off the
+     * outline. */
+    int coarse = rg_pattern_spiral(&s, 0, 60, 10, &st);
+    CHECK(coarse == 0);
+    if (coarse > 0)
+        rg_strokes_free(st, coarse);
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+
+    /* A region with a hole is refused: a ring would run straight over it. */
+    char inner[512], both[1024];
+    snprintf(both, sizeof both, "%s%s", rect(r, sizeof r, 0, 0, 100, 100),
+             rect(inner, sizeof inner, 40, 40, 60, 60));
+    CHECK(drawing_of(both, &d));
+    CHECK(rg_shape_build_lenient(&d, 0.1, &s, &skipped));
+    CHECK(s.n == 2);
+    CHECK(rg_pattern_spiral(&s, 0, 6, 10, &st) == 0);
+    rg_shape_free(&s);
+    rg_drawing_free(&d);
+}
+
 static void test_fill(void)
 {
     char a[512], b[512], both[1024];
@@ -230,4 +292,5 @@ TEST_MAIN("test_pattern",
     test_trace();
     test_lenient();
     test_fill();
+    test_spiral();
 )

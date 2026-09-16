@@ -281,6 +281,124 @@ void rg_strokes_free(RgStroke *s, int n)
     free(s);
 }
 
+/* ---- spiral --------------------------------------------------------- */
+
+/* The signed area of a bare ring, so a collapsed one can be told from a
+ * good one without building a whole RgLoop for it. */
+static double ring_area(const RgPt *p, int n)
+{
+    double a = 0.0;
+    for (int i = 0; i < n; i++) {
+        RgPt u = p[i], v = p[(i + 1) % n];
+        a += u.x * v.y - v.x * u.y;
+    }
+    return 0.5 * a;
+}
+
+/* Start the ring at the point nearest `from`, so the step across from the
+ * ring outside it is as short as it can be, and go round once. */
+static bool ring_from(Pts *cur, const RgPt *ring, int n, RgPt from)
+{
+    int at = 0;
+    double best = DBL_MAX;
+    for (int i = 0; i < n; i++) {
+        double d = dist(from, ring[i]);
+        if (d < best) {
+            best = d;
+            at = i;
+        }
+    }
+    for (int i = 0; i <= n; i++) {
+        RgPt v = ring[(at + i) % n];
+        if (cur->n && dist(v, cur->p[cur->n - 1]) < 1e-9)
+            continue;
+        if (!pts_add(cur, v.x, v.y))
+            return false;
+    }
+    return true;
+}
+
+int rg_pattern_spiral(const RgShape *s, int which, double first, double pitch, RgStroke **out)
+{
+    *out = NULL;
+    if (which < 0 || which >= s->n || !(pitch > 0.0))
+        return 0;
+
+    const RgLoop *outer = &s->loops[which];
+    int n = outer->n;
+    if (n < 3)
+        return 0;
+
+    /* A ring that ran through a hole would coat what is meant to stay bare,
+     * and an inset ring cannot be trusted to keep clear of one. */
+    double outer_area = fabs(rg_loop_area(outer));
+    for (int i = 0; i < s->n; i++)
+        if (i != which && rg_loop_contains(outer, s->loops[i].pts[0]) &&
+            fabs(rg_loop_area(&s->loops[i])) < outer_area)
+            return 0;
+
+    bool ccw = rg_loop_area(outer) >= 0.0;
+    double sign = ccw ? 1.0 : -1.0;
+
+    RgPt *ring = malloc((size_t)n * sizeof *ring);
+    if (!ring)
+        return -1;
+
+    Pts cur = { 0 };
+    RgPt from = outer->pts[0];
+    double prev_area = fabs(rg_loop_area(outer));
+    bool ok = true, any = false;
+
+    for (int r = 0; ok; r++) {
+        double inset = first + r * pitch;
+        offset_loop(outer->pts, n, inset, ccw, ring);
+
+        /*
+         * Inset far enough and the ring folds through the middle and comes
+         * out the other side: on a 100 mm square an inset of 60 gives a tidy
+         * 20 mm square, the right way round and smaller than its parent, so
+         * area alone lets it through. The test that catches it is the
+         * definition of an offset — every point of a ring inset by d stands
+         * d clear of the outline — and a folded ring stands nearer than it
+         * claims.
+         */
+        double area = ring_area(ring, n);
+        if (area * sign <= 0.0 || fabs(area) < 1e-6 || fabs(area) >= prev_area)
+            break;
+        bool sound = true;
+        for (int i = 0; i < n && sound; i++) {
+            RgPt on;
+            sound = rg_loop_contains(outer, ring[i]) &&
+                    rg_loop_nearest(outer, ring[i], &on) + 1e-6 >= inset;
+        }
+        if (!sound)
+            break;
+        prev_area = fabs(area);
+
+        ok = ring_from(&cur, ring, n, from);
+        if (!ok)
+            break;
+        from = cur.n ? cur.p[cur.n - 1] : from;
+        any = true;
+    }
+    free(ring);
+
+    if (!ok || !any) {
+        free(cur.p);
+        return ok ? 0 : -1;
+    }
+
+    Strokes list = { 0 };
+    if (!strokes_take(&list, &cur, 1.0, 0.0)) {     /* already in drawing axes */
+        free(cur.p);
+        rg_strokes_free(list.s, list.n);
+        return -1;
+    }
+    free(cur.p);
+    *out = list.s;
+    return list.n;
+}
+
 int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke **out)
 {
     *out = NULL;

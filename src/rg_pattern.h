@@ -70,6 +70,27 @@ typedef struct {
  */
 int rg_pattern_fill(const RgShape *s, int which, const RgFillOpts *o, RgStroke **out);
 
+/*
+ * Cover the region inside loop `which` by following its outline inward: a
+ * ring at `first` inside the edge, then one every `pitch` further in, each
+ * ring joined to the next by a step across, so the whole region is one
+ * continuous path the gun can be driven round without leaving the work.
+ *
+ * This is the shape a torch is actually driven in. The zig-zag `fill` turns
+ * through a square corner at the end of every pass; a spiral only ever
+ * follows the outline.
+ *
+ * Rings stop when one collapses: inset far enough and a corner turns itself
+ * inside out, so a ring is kept only while it still runs the same way round
+ * as the outline, still holds area, and is smaller than the ring outside it.
+ * Holes are NOT handled: a region with a hole in it is refused (0 strokes),
+ * because a ring crossing a hole would coat what is meant to stay bare.
+ *
+ * One stroke, malloc'd, closed on itself only when a single ring fits.
+ * Returns the number of strokes (0 or 1), -1 out of memory.
+ */
+int rg_pattern_spiral(const RgShape *s, int which, double first, double pitch, RgStroke **out);
+
 void rg_strokes_free(RgStroke *s, int n);
 
 #endif /* RG_PATTERN_H */

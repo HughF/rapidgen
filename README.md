@@ -42,7 +42,7 @@ the direction are the program. Tools:
 | Line | L | Click points; they snap to the drawing's corners and lines (Shift to place one freely). Double-click or Enter finishes, Backspace takes one back, Escape cancels |
 | Draw | D | Freehand; thinned to the points that matter when you let go |
 | Trace | T | Click near an outline: once round it from that point, inset by the amount set |
-| Fill | F | Click inside an outline: parallel passes a step-over apart, previewed as you hover |
+| Fill | F | Click inside an outline. **Spiral** follows the outline inward as one continuous path; otherwise parallel passes a step-over apart. Previewed as you hover |
 | Scale | M | Click two points a known distance apart, then type the true distance |
 
 Delete removes the selected stroke, R reverses it, and the stroke list
@@ -81,6 +81,14 @@ once, goes round it `laps` times with the seam blended, and leaves once. That
 is how a torch is actually driven — round the path, lap after lap — rather
 than stopping at the end of each lap and coming back down to start the next,
 which lays a heavy patch on the seam every time.
+
+Covering an area works the same way. The Fill tool's **Spiral** follows the
+outline inward — a ring half a spot inside the edge, then one every step-over
+further in, each joined to the next — so the whole region is one path the gun
+is driven round, with no square turn at the end of a pass. Rings stop when one
+would collapse in on itself, and a region with a hole in it is refused rather
+than spiralled, because a ring would run straight across the hole. The zig-zag
+fill is still there for parts that suit it.
 
 Each open stroke is **run on and off**: extended past both ends by `lead` —
 by default far enough to reach spray speed and stop again, worked out from the

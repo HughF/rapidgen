@@ -24,7 +24,8 @@
  *   Line    click points, snapping to the drawing's corners and lines
  *   Draw    freehand, thinned to what matters when the button is let go
  *   Trace   round an outline, inset by an amount
- *   Fill    parallel passes across the region clicked, previewed on hover
+ *   Fill    the region clicked, previewed on hover: rings following the
+ *           outline inward, or parallel passes across it
  *   Scale   two points a known distance apart set the drawing's scale
  */
 #include "rg_ui_int.h"
@@ -54,7 +55,7 @@ static const char *TOOL_TIP[TOOL_COUNT] = {
     "Trace an outline: click near it, and the gun goes round once from that "
     "point, inset by the amount set (T)",
     "Fill a region: click inside an outline to cover it with passes a fan "
-    "width less the overlap apart. Hover to preview (F)",
+    "a step-over apart, or rings following it inward. Hover to preview (F)",
     "Scale the drawing: click two points a known distance apart, then type the "
     "true distance (M)",
 };
@@ -436,27 +437,48 @@ static void fill_loop(RgUi *ui, int loop)
         ui_message(ui, true, "Set the spot and the step-over first: they space the passes.");
         return;
     }
-    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * spray_width(ui) : 0.0 };
+    /* The gun covers nothing until it has a width, and NaN would spiral the
+     * rings off to nowhere. */
+    double half = spray_width(ui) > 0.0 ? 0.5 * spray_width(ui) : 0.0;
     RgStroke *st;
-    int n = rg_pattern_fill(&ui->shape, loop, &o, &st);
-    if (n <= 0) {
-        ui_message(ui, n < 0, n < 0 ? "Out of memory." : "There is nothing to fill there.");
-        return;
+    int n;
+    if (ui->fill_spiral) {
+        n = rg_pattern_spiral(&ui->shape, loop, half, pitch, &st);
+        if (n <= 0) {
+            ui_message(ui, n < 0, n < 0 ? "Out of memory."
+                       : "No spiral fits there: the region is narrower than the spray, or it "
+                         "has a hole in it.");
+            return;
+        }
+    } else {
+        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0 };
+        n = rg_pattern_fill(&ui->shape, loop, &o, &st);
+        if (n <= 0) {
+            ui_message(ui, n < 0, n < 0 ? "Out of memory." : "There is nothing to fill there.");
+            return;
+        }
     }
     int added = 0;
     for (int i = 0; i < n; i++)
         added += rg_job_add_stroke(&ui->job, st[i].pts, st[i].n);
     rg_strokes_free(st, n);
     ui->selected = ui->job.nstrokes - 1;
-    ui_message(ui, false, "Filled with %d stroke%s, passes %.1f mm apart", added,
-               added == 1 ? "" : "s", pitch);
+    if (ui->fill_spiral)
+        ui_message(ui, false, "Spiralled inward as %d stroke%s, rings %.1f mm apart", added,
+                   added == 1 ? "" : "s", pitch);
+    else
+        ui_message(ui, false, "Filled with %d stroke%s, passes %.1f mm apart", added,
+                   added == 1 ? "" : "s", pitch);
 }
 
 static void update_fill_preview(RgUi *ui)
 {
     double pitch = fill_pitch(ui);
-    double key[4] = { pitch, ui->fill_angle, ui->fill_extend ? spray_width(ui) : 0.0,
-                      ui->shown_scale };
+    /* The spiral flag belongs in the key: without it, flipping the toggle
+     * leaves the previous pattern on screen, and the preview is what the
+     * region is aimed with. */
+    double key[5] = { pitch, ui->fill_angle, ui->fill_extend ? spray_width(ui) : 0.0,
+                      ui->shown_scale, ui->fill_spiral ? 1.0 : 0.0 };
     bool want = ui->tool == TOOL_FILL && ui->hover_loop >= 0 && pitch > 0.5 && painting(ui);
     if (!want) {
         clear_preview(ui);
@@ -465,8 +487,14 @@ static void update_fill_preview(RgUi *ui)
     if (ui->preview_loop == ui->hover_loop && memcmp(key, ui->preview_key, sizeof key) == 0)
         return;
     clear_preview(ui);
-    RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? 0.5 * spray_width(ui) : 0.0 };
-    int n = rg_pattern_fill(&ui->shape, ui->hover_loop, &o, &ui->preview);
+    double half = spray_width(ui) > 0.0 ? 0.5 * spray_width(ui) : 0.0;
+    int n;
+    if (ui->fill_spiral) {
+        n = rg_pattern_spiral(&ui->shape, ui->hover_loop, half, pitch, &ui->preview);
+    } else {
+        RgFillOpts o = { pitch, ui->fill_angle, ui->fill_extend ? half : 0.0 };
+        n = rg_pattern_fill(&ui->shape, ui->hover_loop, &o, &ui->preview);
+    }
     ui->npreview = n > 0 ? n : 0;
     ui->preview_loop = ui->hover_loop;
     memcpy(ui->preview_key, key, sizeof key);
@@ -863,21 +891,27 @@ static void inspect_tool(RgUi *ui)
                       "check the preview.", t->text_dim);
         break;
     case TOOL_FILL: {
-        ui_prop(ui, "Angle", ui->job.pattern == RG_PAT_FAN
-                ? "The direction of the passes, from the drawing's X axis. The passes should "
-                  "run across the fan, which lies at the Fan angle below"
-                : "The direction of the passes, from the drawing's X axis. A round spot is the "
-                  "same width whichever way they run",
-                &ui->fill_angle, -180, 180, 5, "deg");
+        ui_check(ui, "Spiral", "Follow the outline inward instead of weaving back and forth: "
+                 "one continuous path, driven round the work, with no square turn at the end "
+                 "of every pass. A region with a hole in it cannot be spiralled",
+                 &ui->fill_spiral);
+        if (!ui->fill_spiral)
+            ui_prop(ui, "Angle", ui->job.pattern == RG_PAT_FAN
+                    ? "The direction of the passes, from the drawing's X axis. The passes should "
+                      "run across the fan, which lies at the Fan angle below"
+                    : "The direction of the passes, from the drawing's X axis. A round spot is "
+                      "the same width whichever way they run",
+                    &ui->fill_angle, -180, 180, 5, "deg");
         double p = fill_pitch(ui);
         if (p > 0.0)
             ui_info_rowf(ui, "Spacing", "%.1f mm step-over, %.1f passes per point", p,
                          spray_width(ui) / p);
         else
             ui_info_row(ui, "Spacing", "set the spot and step-over");
-        ui_check(ui, "Run past the edge", "Carry each pass half the gun's width past the "
-                 "outline so the edge gets a full coat. Passes stop at the edge of a hole, so "
-                 "nothing inside it is sprayed", &ui->fill_extend);
+        if (!ui->fill_spiral)
+            ui_check(ui, "Run past the edge", "Carry each pass half the gun's width past the "
+                     "outline so the edge gets a full coat. Passes stop at the edge of a hole, "
+                     "so nothing inside it is sprayed", &ui->fill_extend);
         ui_label_wrap(ui, "Hover inside an outline to preview, click to fill it. Outlines "
                       "inside it are left bare.", t->text_dim);
         break;

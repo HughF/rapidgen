@@ -16,6 +16,13 @@ a second release on the same day.
 - **`laps`** for flat parts: times round a closed path before the gun leaves
   it. The program repeats it as `FOR nLap FROM 1 TO n DO … ENDFOR` inside the
   cycle loop, so the targets are written once however many laps are driven.
+- **Spiral fill.** Covering a region by following its outline inward — a ring
+  half a spot inside the edge, then one every step-over further in, each
+  joined to the next — instead of weaving back and forth across it. The
+  result is one continuous path with no square turn at the end of a pass,
+  which is the shape a torch is actually driven in. Rings stop when one would
+  turn itself inside out, and a region with a hole is refused rather than
+  spiralled, since a ring would run across the hole.
 
 ### Fixed
 
