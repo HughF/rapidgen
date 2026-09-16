@@ -291,6 +291,59 @@ static RgPt extend_from(RgPt prev, RgPt end, double d)
     return p;
 }
 
+/*
+ * A stroke in its parts. The work lies between the lead-in and the run-out,
+ * and it is the work that may close on itself: a racetrack can have tabs of
+ * its own. Lengths are along the path, each tab including the segment that
+ * joins it to the work.
+ */
+typedef struct {
+    int    w0, w1;              /* first and last point of the work */
+    bool   closed;              /* the work is a circuit            */
+    double work, tab_in, tab_out;
+} Parts;
+
+static double path_len(const RgPt *p, int from, int to)
+{
+    double len = 0.0;
+    for (int k = from + 1; k <= to; k++)
+        len += hypot(p[k].x - p[k - 1].x, p[k].y - p[k - 1].y);
+    return len;
+}
+
+static Parts stroke_parts(const RgStroke *st)
+{
+    Parts pt;
+    pt.w0 = st->tab_in;
+    pt.w1 = st->n - 1 - st->tab_out;
+    pt.closed = pt.w1 - pt.w0 >= 2 &&
+                hypot(st->pts[pt.w1].x - st->pts[pt.w0].x,
+                      st->pts[pt.w1].y - st->pts[pt.w0].y) < 1e-6;
+    pt.work = path_len(st->pts, pt.w0, pt.w1);
+    pt.tab_in = path_len(st->pts, 0, pt.w0);
+    pt.tab_out = path_len(st->pts, pt.w1, st->n - 1);
+    return pt;
+}
+
+/*
+ * Where the gun really comes onto a stroke and where it leaves: the far end
+ * of a drawn tab, or the stroke's own end run on by `lead`. An end with a tab
+ * is not also run on, and a circuit has no end to run on from. The checks and
+ * the moves must agree on this, so both come here.
+ */
+static void stroke_ends(const RgStroke *st, const Parts *pt, double lead,
+                        RgPt *first, RgPt *last, double *lead_in, double *lead_out)
+{
+    *lead_in = st->tab_in || pt->closed ? 0.0 : lead;
+    *lead_out = st->tab_out || pt->closed ? 0.0 : lead;
+    if (st->n < 2) {
+        *first = *last = st->pts[0];
+        return;
+    }
+    *first = extend_from(st->pts[1], st->pts[0], *lead_in);
+    *last = extend_from(st->pts[st->n - 2], st->pts[st->n - 1], *lead_out);
+}
+
 static void build_flat(Ctx *c)
 {
     const RgJob *j = c->job;
@@ -303,40 +356,45 @@ static void build_flat(Ctx *c)
         start->after = RG_ACT_READY;
     for (int s = 0; s < j->nstrokes && !c->oom; s++) {
         const RgStroke *st = &j->strokes[s];
-        bool closed = st->n > 2 && hypot(st->pts[st->n - 1].x - st->pts[0].x,
-                                         st->pts[st->n - 1].y - st->pts[0].y) < 1e-6;
-        double use_lead = closed ? 0.0 : lead;
-        RgPt first = extend_from(st->pts[1], st->pts[0], use_lead);
-        RgPt last_pt = extend_from(st->pts[st->n - 2], st->pts[st->n - 1], use_lead);
+        Parts pt = stroke_parts(st);
+        bool tabs = st->tab_in > 0 || st->tab_out > 0;
+        RgPt first, last_pt;
+        double lead_in, lead_out;
+        stroke_ends(st, &pt, lead, &first, &last_pt, &lead_in, &lead_out);
 
-        char note[96];
-        double len = 0.0;
-        for (int k = 1; k < st->n; k++)
-            len += hypot(st->pts[k].x - st->pts[k - 1].x, st->pts[k].y - st->pts[k - 1].y);
-        if (closed)
-            pl->circuits++;
-        if (closed && pl->laps > 1)
-            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm a lap, %d laps round",
-                     s + 1, st->n, len, pl->laps);
+        char note[128], tabnote[40] = "";
+        if (tabs)
+            snprintf(tabnote, sizeof tabnote, ", tabs %ld and %ld mm", lround(pt.tab_in),
+                     lround(pt.tab_out));
+        if (pt.closed && pl->laps > 1)
+            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm a lap, %d laps round%s",
+                     s + 1, st->n, pt.work, pl->laps, tabnote);
         else
-            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm%s", s + 1, st->n, len,
-                     use_lead > 0.0 ? ", run on and off" : closed ? ", a closed circuit" : "");
+            snprintf(note, sizeof note, "Stroke %d: %d points, %.0f mm%s%s", s + 1, st->n,
+                     pt.work,
+                     tabs ? " of work"
+                     : lead_in > 0.0 || lead_out > 0.0 ? ", run on and off"
+                     : pt.closed ? ", a closed circuit" : "",
+                     tabnote);
 
         add_move(c, RG_MV_JOINT, RG_SPD_TRAVEL, RG_Z_TRAVEL, gun_flat(j, first, j->approach),
                  s, note);
-        /* A circuit is entered already moving: the gun must not stop on the
-         * seam, or it lays a heavy patch there every lap. */
+        /* A circuit entered straight onto its seam must not stop there, or it
+         * lays a heavy patch every lap; a stroke that starts off the work, on
+         * a tab or a run-on, can stop where it lands. */
+        bool lands_on_work = st->tab_in == 0 && lead_in <= 0.0;
         RgMove *in = add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH,
-                              closed ? RG_Z_SMALL : RG_Z_FINE, gun_flat(j, first, 0), s, NULL);
+                              pt.closed && lands_on_work ? RG_Z_SMALL : RG_Z_FINE,
+                              gun_flat(j, first, 0), s, NULL);
         if (!in)
             return;
         if (switched)
             in->after = RG_ACT_GUN_ON;
 
-        /* The run-on, then the stroke, then the run-off: rounded corners
-         * throughout so the gun never stops over the work. */
+        /* Lead-in or run-on, the work, then run-out or run-off: rounded
+         * corners throughout so the gun never stops over the work. */
         RgMove *last = in;
-        int lap_first = -1;
+        int lap_first = -1, lap_last = -1;
         RgPt at = first;
         for (int k = 0; k < st->n; k++) {
             if (hypot(st->pts[k].x - at.x, st->pts[k].y - at.y) < 1e-6)
@@ -345,25 +403,31 @@ static void build_flat(Ctx *c)
             last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_SMALL, gun_flat(j, at, 0), s, NULL);
             if (!last)
                 return;
-            if (lap_first < 0)
-                lap_first = pl->nmoves - 1;
+            if (k > pt.w0 && k <= pt.w1) {
+                if (lap_first < 0)
+                    lap_first = pl->nmoves - 1;
+                lap_last = pl->nmoves - 1;
+            }
         }
-        /* Round and round the circuit, the seam blended, rather than lifting
-         * off and coming back down for every lap. The laps are marked by
-         * index, not by pointer: add_move reallocs, so an RgMove * taken
-         * before the next one may already be dead. */
-        if (closed && pl->laps > 1 && lap_first >= 0 && lap_first < pl->nmoves - 1) {
+        /* Round and round the circuit's work, the seam blended, rather than
+         * lifting off and coming back down for every lap; any lead-in comes
+         * before the laps and any run-out after. Marked by index, not by
+         * pointer: add_move reallocs, so an RgMove * taken before the next
+         * one may already be dead. */
+        if (pt.closed && pl->laps > 1 && lap_first >= 0 && lap_last > lap_first) {
             pl->moves[lap_first].lap_begin = true;
-            pl->moves[pl->nmoves - 1].lap_end = true;
+            pl->moves[lap_last].lap_end = true;
         }
-        if (use_lead > 0.0 && hypot(last_pt.x - at.x, last_pt.y - at.y) > 1e-6) {
+        if (lead_out > 0.0 && hypot(last_pt.x - at.x, last_pt.y - at.y) > 1e-6) {
             at = last_pt;
             last = add_move(c, RG_MV_LINEAR, RG_SPD_SPRAY, RG_Z_SMALL, gun_flat(j, at, 0), s, NULL);
             if (!last)
                 return;
         }
-        /* Stop only once the gun is clear of the work; a circuit never stops. */
-        last->zone = use_lead > 0.0 ? RG_Z_TRAVEL : closed ? RG_Z_SMALL : RG_Z_FINE;
+        /* Stop only once the gun is off the work: at the end of a run-out or
+         * a run-off. A circuit that finishes on its seam never stops there. */
+        last->zone = lead_out > 0.0 || st->tab_out > 0 ? RG_Z_TRAVEL
+                   : pt.closed ? RG_Z_SMALL : RG_Z_FINE;
         if (switched)
             last->after = RG_ACT_GUN_OFF;
         add_move(c, RG_MV_LINEAR, RG_SPD_APPROACH, RG_Z_TRAVEL, gun_flat(j, at, j->approach),
@@ -674,19 +738,32 @@ static void check_flat(Ctx *c)
     double x0 = DBL_MAX, y0 = DBL_MAX, x1 = -DBL_MAX, y1 = -DBL_MAX;
     double fan_a = j->fan_along * RG_DEG, fx = cos(fan_a), fy = sin(fan_a);
     double along_fan = 0.0;
+    int shortest_stroke = -1;
+    bool shortest_out = false;
     for (int s = 0; s < j->nstrokes; s++) {
         const RgStroke *st = &j->strokes[s];
-        if (st->n < 2)
+        if (st->n < 2) {
             issue(c, RG_REFUSE, "stroke %d has only one point", s + 1);
-        /* A circuit is sprayed once per lap, so it lays down that much length. */
-        bool circuit = st->n > 2 && hypot(st->pts[st->n - 1].x - st->pts[0].x,
-                                          st->pts[st->n - 1].y - st->pts[0].y) < 1e-6;
-        int reps = circuit ? pl->laps : 1;
-        for (int k = 0; k < st->n; k++) {
+            continue;
+        }
+        /*
+         * Only the work coats the part; the tabs are sprayed off it. A circuit
+         * is sprayed once a lap. Circuits are counted here rather than when
+         * the moves are built, because the notes below need them and the
+         * checks run first.
+         */
+        Parts pt = stroke_parts(st);
+        if (pt.closed)
+            pl->circuits++;
+        int reps = pt.closed ? pl->laps : 1;
+        pl->tab_length += pt.tab_in + pt.tab_out;
+        if (!pt.closed)
+            pl->lead_ends += (st->tab_in == 0) + (st->tab_out == 0);
+        for (int k = pt.w0; k <= pt.w1; k++) {
             RgPt p = st->pts[k];
             x0 = fmin(x0, p.x); x1 = fmax(x1, p.x);
             y0 = fmin(y0, p.y); y1 = fmax(y1, p.y);
-            if (k > 0) {
+            if (k > pt.w0) {
                 double dx = p.x - st->pts[k - 1].x, dy = p.y - st->pts[k - 1].y;
                 double len = hypot(dx, dy);
                 pl->stroke_length += len * reps;
@@ -695,18 +772,43 @@ static void check_flat(Ctx *c)
                 if (len > 1e-9 && fabs((dx * fx + dy * fy) / len) > cos(30.0 * RG_DEG))
                     along_fan += len;
             }
-            if (k > 0 && k + 1 < st->n) {
-                RgPt a = st->pts[k - 1], b = st->pts[k + 1];
-                double ax = p.x - a.x, ay = p.y - a.y, bx = b.x - p.x, by = b.y - p.y;
-                double la = hypot(ax, ay), lb = hypot(bx, by);
-                if (la > 1e-6 && lb > 1e-6) {
-                    double cosang = (ax * bx + ay * by) / (la * lb);
-                    if (cosang < cos(SHARP_CORNER_DEG * RG_DEG))
-                        pl->sharp_corners++;
+        }
+        /* Corners on the work, and where a tab joins it: that joint is on the
+         * edge of the work, and the robot slows through it. */
+        for (int k = pt.w0 > 0 ? pt.w0 : 1; k <= pt.w1 && k + 1 < st->n; k++) {
+            RgPt a = st->pts[k - 1], p = st->pts[k], b = st->pts[k + 1];
+            double ax = p.x - a.x, ay = p.y - a.y, bx = b.x - p.x, by = b.y - p.y;
+            double la = hypot(ax, ay), lb = hypot(bx, by);
+            if (la > 1e-6 && lb > 1e-6) {
+                double cosang = (ax * bx + ay * by) / (la * lb);
+                if (cosang < cos(SHARP_CORNER_DEG * RG_DEG))
+                    pl->sharp_corners++;
+            }
+        }
+        /* A tab has to be long enough for the gun to reach speed before the
+         * work, or stop after it. The user's rule is 5 x spot off the path;
+         * the physics is the floor under it. Warned, not refused. */
+        for (int e = 0; e < 2; e++) {
+            int count = e ? st->tab_out : st->tab_in;
+            double len = e ? pt.tab_out : pt.tab_in;
+            if (count > 0 && len + 1e-6 < pl->lead_needed) {
+                if (!pl->short_tabs || len < pl->shortest_tab) {
+                    pl->shortest_tab = len;
+                    shortest_stroke = s;
+                    shortest_out = e == 1;
                 }
+                pl->short_tabs++;
             }
         }
     }
+    if (pl->short_tabs)
+        issue(c, RG_WARN, "%d tab%s shorter than the %.1f mm the gun needs to reach %.0f mm/s "
+              "(%.0f mm/s\xc2\xb2) and stop again; the shortest is stroke %d's %s at %.1f mm, "
+              "so the gun is still %s over the work there, which shows as a ridge in the "
+              "coating", pl->short_tabs, pl->short_tabs == 1 ? " is" : "s are",
+              pl->lead_needed, pl->spray_speed, j->accel, shortest_stroke + 1,
+              shortest_out ? "run-out" : "lead-in", pl->shortest_tab,
+              shortest_out ? "slowing" : "speeding up");
     if (pl->laps > 1 && pl->circuits > 0 && pl->circuits < j->nstrokes)
         issue(c, RG_NOTE, "the %d lap%s apply only to the %d closed circuit%s; the open strokes "
               "are sprayed once a cycle, so the thickness estimate counts one lap",
@@ -744,15 +846,24 @@ static void check_flat(Ctx *c)
     if (j->gun == RG_GUN_CONTINUOUS && j->nstrokes) {
         double px0 = x0 - 0.5 * rg_job_width(j), px1 = x1 + 0.5 * rg_job_width(j);
         double py0 = y0 - 0.5 * rg_job_width(j), py1 = y1 + 0.5 * rg_job_width(j);
+        /* Where the gun really comes down and lifts: past a tab or a run-on,
+         * not the stroke's drawn end. Testing the drawn end reported a gun
+         * that had already left the work as dropping onto it. */
         for (int s = 0; s < j->nstrokes; s++) {
-            RgPt a = j->strokes[s].pts[0];
-            RgPt z = j->strokes[s].pts[j->strokes[s].n - 1];
+            if (j->strokes[s].n < 2)
+                continue;
+            Parts pa = stroke_parts(&j->strokes[s]);
+            RgPt a, z;
+            double li, lo;
+            stroke_ends(&j->strokes[s], &pa, pl->lead_used, &a, &z, &li, &lo);
             if (a.x >= px0 && a.x <= px1 && a.y >= py0 && a.y <= py1)
                 pl->transit_drops++;
             if (z.x >= px0 && z.x <= px1 && z.y >= py0 && z.y <= py1)
                 pl->transit_drops++;
-            if (s + 1 < j->nstrokes) {
-                RgPt b = j->strokes[s + 1].pts[0];
+            if (s + 1 < j->nstrokes && j->strokes[s + 1].n >= 2) {
+                Parts pb = stroke_parts(&j->strokes[s + 1]);
+                RgPt b, bz;
+                stroke_ends(&j->strokes[s + 1], &pb, pl->lead_used, &b, &bz, &li, &lo);
                 /* however much of the hop between strokes passes over the part */
                 double n = 32.0, inside = 0.0;
                 double seg = hypot(b.x - z.x, b.y - z.y) / n;

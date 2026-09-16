@@ -382,9 +382,33 @@ static void test_flat(void)
     CHECK_NEAR(pl.thickness_total, 300.0, 1e-9);
     CHECK(pl.min_clearance >= j.clearance);
     CHECK_NEAR(pl.min_clearance, 150.0, 1e-6);                /* the gun tip, at the standoff */
-    /* The torch runs while the gun hops between strokes, over the part. */
-    CHECK(pl.transit_drops > 0);
+    /* The run-on and run-off take the gun off the work before it lifts or
+     * hops to the next stroke, so the torch lands nothing where it should
+     * not. (Testing the drawn ends used to report this as dropping onto the
+     * part: the gun had already left it.) */
+    CHECK(pl.transit_drops == 0);
+    CHECK_NEAR(pl.transit_over_part, 0.0, 1e-9);
+    CHECK(!has_issue(&pl, RG_WARN, "the gun runs continuously"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* With no run-on, it really does come down and hop over the work. */
+    flat_with(&j, "lead = 0");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.transit_drops == 4);
+    CHECK_NEAR(pl.transit_over_part, 170.0, 1e-6);
     CHECK(has_issue(&pl, RG_WARN, "the gun runs continuously"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* laps on a pattern with a circuit in it are not "of no effect". The
+     * circuits used to be counted only when the moves were built, after the
+     * notes had already been decided. */
+    flat_with(&j, "laps = 3\nstroke = 100 100  400 100  400 200  100 200  100 100");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.circuits == 1);
+    CHECK(!has_issue(&pl, RG_NOTE, "has no effect"));
+    CHECK(has_issue(&pl, RG_NOTE, "apply only to the 1 closed circuit"));
     rg_plan_free(&pl);
     rg_job_free(&j);
 
@@ -448,7 +472,103 @@ static void test_flat(void)
     rg_job_free(&j);
 }
 
+/* A flat job whose only stroke is `stroke`, on the flat template's settings
+ * (300 mm/s, accel 2000, 12 mm spot: lead_needed 28.5 mm). */
+static void only_stroke(RgJob *j, const char *extra)
+{
+    flat_with(j, extra);
+    rg_job_delete_stroke(j, 0);
+    rg_job_delete_stroke(j, 0);
+    CHECK(j->nstrokes == 1);
+}
+
+/*
+ * Tabs. The robot does not switch the torch, so the gun comes onto the work
+ * along a lead-in and leaves along a run-out; both are sprayed, neither is
+ * on the part.
+ */
+static void test_tabs(void)
+{
+    RgJob j;
+    RgPlan pl;
+
+    /* 60 mm each side of 400 mm of work. */
+    only_stroke(&j, "stroke = -10 200 | 50 200  450 200 | 510 200");
+    bool ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+    CHECK_NEAR(pl.stroke_length, 400.0, 1e-9);         /* the work, not the tabs */
+    CHECK_NEAR(pl.tab_length, 120.0, 1e-9);
+    CHECK(pl.lead_ends == 0);                          /* nothing run on by lead */
+    CHECK(pl.short_tabs == 0);
+    CHECK(!has_issue(&pl, RG_WARN, "tab"));
+    /* home; approach, down onto the lead-in, 3 points, up; home — no run-on */
+    CHECK(pl.nmoves == 8);
+    if (pl.nmoves == 8) {
+        CHECK_NEAR(pl.moves[2].tcp.pos.x, -10.0, 1e-9);
+        CHECK(pl.moves[2].zone == RG_Z_FINE);             /* off the work: may stop */
+        CHECK_NEAR(pl.moves[5].tcp.pos.x, 510.0, 1e-9);
+        CHECK(pl.moves[5].zone == RG_Z_TRAVEL);
+        CHECK(pl.moves[3].zone == RG_Z_SMALL && pl.moves[4].zone == RG_Z_SMALL);
+    }
+    CHECK(pl.transit_drops == 0);
+    check_moves_consistent(&j, &pl);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* 20 mm tabs cannot get the gun up to 300 mm/s: warned with the numbers. */
+    only_stroke(&j, "stroke = 30 200 | 50 200  450 200 | 470 200");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.short_tabs == 2);
+    CHECK_NEAR(pl.shortest_tab, 20.0, 1e-9);
+    CHECK(has_issue(&pl, RG_WARN, "2 tabs are shorter than the 28.5 mm"));
+    CHECK(has_issue(&pl, RG_WARN, "stroke 1's lead-in at 20.0 mm"));
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* A run-out drawn, no lead-in: that end is still run on by lead. */
+    only_stroke(&j, "stroke = | 50 200  450 200 | 510 200");
+    CHECK(rg_plan_build(&j, NULL, &pl));
+    CHECK(pl.lead_ends == 1);
+    CHECK_NEAR(pl.tab_length, 60.0, 1e-9);
+    CHECK(pl.nmoves == 8);
+    if (pl.nmoves == 8)
+        CHECK_NEAR(pl.moves[2].tcp.pos.x, 50.0 - pl.lead_used, 1e-9);
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+
+    /* A racetrack with a lead-in and a run-out: in along the tab, round the
+     * work lap after lap, out along the other tab. */
+    only_stroke(&j, "laps = 4\n"
+                    "stroke = -10 100 | 50 100  450 100  450 250  50 250  50 100 | -10 250");
+    ok = rg_plan_build(&j, NULL, &pl);
+    if (!ok)
+        show(&pl);
+    CHECK(ok);
+    CHECK(pl.circuits == 1);
+    CHECK_NEAR(pl.stroke_length, 1100.0 * 4, 1e-9);
+    /* home, approach, down, lead-in end, 4 laps of work, run-out, up, home */
+    CHECK(pl.nmoves == 11);
+    if (pl.nmoves == 11) {
+        int begins = 0, ends = 0;
+        for (int i = 0; i < pl.nmoves; i++) {
+            begins += pl.moves[i].lap_begin;
+            ends += pl.moves[i].lap_end;
+        }
+        CHECK(begins == 1 && ends == 1);
+        CHECK(pl.moves[4].lap_begin);                    /* first move after the lead-in */
+        CHECK(pl.moves[7].lap_end);                      /* back on the seam */
+        CHECK(pl.moves[7].zone == RG_Z_SMALL);           /* laps blend, no stop */
+        CHECK_NEAR(pl.moves[8].tcp.pos.x, -10.0, 1e-9);  /* then out along the run-out */
+        CHECK(pl.moves[8].zone == RG_Z_TRAVEL);
+    }
+    rg_plan_free(&pl);
+    rg_job_free(&j);
+}
+
 TEST_MAIN("test_plan",
+    test_tabs();
     test_template_plan();
     test_bands();
     test_drawings();

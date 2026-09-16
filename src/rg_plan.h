@@ -92,6 +92,10 @@ struct RgPlan {
     double cycle_time;          /* seconds spraying, one cycle             */
     double lead_used;           /* flat: run-on and run-off at each end    */
     double lead_needed;         /* ...the least the speed allows           */
+    int    lead_ends;           /* flat: stroke ends run on by lead, no tab */
+    double tab_length;          /* flat: sprayed off the work on tabs, a cycle */
+    int    short_tabs;          /* ...tabs shorter than lead_needed        */
+    double shortest_tab;        /* ...the shortest of those, mm            */
     double passes_per_point;    /* the gun's width over the step-over      */
     double thickness_cycle;     /* microns a cycle lays down, if given     */
     double thickness_total;     /* ...over every cycle                     */
