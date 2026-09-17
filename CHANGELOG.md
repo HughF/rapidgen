@@ -3,7 +3,7 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
-## [Unreleased]
+## [2026.09.17] — alpha, covering a track
 
 ### Added
 
