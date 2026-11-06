@@ -3,6 +3,19 @@
 All notable changes to rapidgen. Versions are dates (YYYY.MM.DD), with .N for
 a second release on the same day.
 
+## [Unreleased]
+
+### Changed
+
+- Checkboxes, radio buttons and drop-down arrows have the CM Acquire look.
+  A checkbox is a rounded box with a thin outline, an accent outline on
+  hover, and a solid accent fill with a drawn tick when ticked (the tick is
+  dark on a light accent, white on a dark one). A radio button is a ring that
+  turns accent when selected, with a small dot inside. A drop-down's arrow is
+  a thin chevron instead of a solid triangle. The drawing is in
+  `nk_draw_checkbox`, `nk_draw_option` and `nk_draw_symbol` in
+  `third_party/nuklear.h`; the sizes and colours are set in the theme.
+
 ## [2026.09.17] — alpha, covering a track
 
 ### Added

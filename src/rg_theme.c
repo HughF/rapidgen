@@ -179,8 +179,11 @@ void rg_theme_apply(struct nk_context *ctx, const RgTheme *t, float scale)
     s->option.text_normal      = t->text;
     s->option.text_hover       = t->text;
     s->option.text_active      = t->text;
-    s->option.border           = 1.0f;
+    /* Radio: 1.5px ring that turns accent when selected, with a small
+     * inner dot (cursor inset by padding). */
+    s->option.border           = 1.5f * scale;
     s->option.border_color     = t->border;
+    s->option.padding          = nk_vec2(3.5f * scale, 3.5f * scale);
 
     s->property.rounding       = r;
     s->property.border         = 1.0f;
@@ -209,6 +212,12 @@ void rg_theme_apply(struct nk_context *ctx, const RgTheme *t, float scale)
     s->combo.label_active      = t->text;
     s->combo.content_padding   = nk_vec2(8 * scale, 5 * scale);
     s->combo.button_padding    = nk_vec2(2 * scale, 2 * scale);
+    s->combo.sym_normal        = NK_SYMBOL_CHEVRON_DOWN;
+    s->combo.sym_hover         = NK_SYMBOL_CHEVRON_DOWN;
+    s->combo.sym_active        = NK_SYMBOL_CHEVRON_UP;
+    s->combo.button.text_normal = t->text_dim;
+    s->combo.button.text_hover = t->text;
+    s->combo.button.text_active = t->text;
 
     s->contextual_button.rounding = r;
     s->selectable.rounding     = r;

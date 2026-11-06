@@ -552,6 +552,10 @@ enum nk_symbol_type {
     NK_SYMBOL_TRIANGLE_DOWN_OUTLINE,
     NK_SYMBOL_TRIANGLE_LEFT_OUTLINE,
     NK_SYMBOL_TRIANGLE_RIGHT_OUTLINE,
+    NK_SYMBOL_CHEVRON_UP,
+    NK_SYMBOL_CHEVRON_DOWN,
+    NK_SYMBOL_CHEVRON_LEFT,
+    NK_SYMBOL_CHEVRON_RIGHT,
     NK_SYMBOL_MAX
 };
 /* =============================================================================
@@ -24473,6 +24477,28 @@ nk_draw_symbol(struct nk_command_buffer *out, enum nk_symbol_type type,
         nk_stroke_triangle(out, points[0].x, points[0].y, points[1].x, points[1].y,
             points[2].x, points[2].y, border_width, foreground);
     } break;
+    case NK_SYMBOL_CHEVRON_UP:
+    case NK_SYMBOL_CHEVRON_DOWN:
+    case NK_SYMBOL_CHEVRON_LEFT:
+    case NK_SYMBOL_CHEVRON_RIGHT: {
+        /* open stroked arrow head, centred in the middle 55% of the box */
+        float side = NK_MIN(content.w, content.h) * 0.55f;
+        float cx = content.x + content.w * 0.5f, cy = content.y + content.h * 0.5f;
+        float h = side * 0.5f, q = side * 0.25f;
+        float t = NK_MAX(1.5f, side * 0.18f);
+        float pts[6];
+        switch (type) {
+        case NK_SYMBOL_CHEVRON_UP:
+            pts[0]=cx-h; pts[1]=cy+q; pts[2]=cx; pts[3]=cy-q; pts[4]=cx+h; pts[5]=cy+q; break;
+        case NK_SYMBOL_CHEVRON_DOWN:
+            pts[0]=cx-h; pts[1]=cy-q; pts[2]=cx; pts[3]=cy+q; pts[4]=cx+h; pts[5]=cy-q; break;
+        case NK_SYMBOL_CHEVRON_LEFT:
+            pts[0]=cx+q; pts[1]=cy-h; pts[2]=cx-q; pts[3]=cy; pts[4]=cx+q; pts[5]=cy+h; break;
+        default:
+            pts[0]=cx-q; pts[1]=cy-h; pts[2]=cx+q; pts[3]=cy; pts[4]=cx-q; pts[5]=cy+h; break;
+        }
+        nk_stroke_polyline(out, pts, 3, t, foreground);
+    } break;
     default:
     case NK_SYMBOL_NONE:
     case NK_SYMBOL_MAX: break;
@@ -25152,15 +25178,32 @@ nk_draw_checkbox(struct nk_command_buffer *out,
     text.background = style->text_background;
     nk_widget_text(out, *label, string, len, &text, text_alignment, font);
 
-    /* draw background and cursor */
+    /* draw background and cursor: rounded box, solid cursor-colour fill with
+     * a tick when checked, cursor-colour outline when hovered */
     if (background->type == NK_STYLE_ITEM_COLOR) {
-        nk_fill_rect(out, *selector, 0, nk_rgb_factor(style->border_color, style->color_factor));
-        nk_fill_rect(out, nk_shrink_rect(*selector, style->border), 0, nk_rgb_factor(background->data.color, style->color_factor));
+        float rad = selector->h * 0.22f;
+        struct nk_color ring = style->border_color;
+        if (cursor->type == NK_STYLE_ITEM_COLOR && (active || (state & NK_WIDGET_STATE_HOVER)))
+            ring = cursor->data.color;
+        nk_fill_rect(out, *selector, rad, nk_rgb_factor(ring, style->color_factor));
+        if (!active)
+            nk_fill_rect(out, nk_shrink_rect(*selector, style->border), NK_MAX(rad - style->border, 0.0f), nk_rgb_factor(background->data.color, style->color_factor));
     } else nk_draw_image(out, *selector, &background->data.image, nk_rgb_factor(nk_white, style->color_factor));
     if (active) {
         if (cursor->type == NK_STYLE_ITEM_IMAGE)
             nk_draw_image(out, *cursors, &cursor->data.image, nk_rgb_factor(nk_white, style->color_factor));
-        else nk_fill_rect(out, *cursors, 0, cursor->data.color);
+        else {
+            struct nk_color f = style->cursor_normal.type == NK_STYLE_ITEM_COLOR ?
+                style->cursor_normal.data.color : cursor->data.color;
+            struct nk_color tick = (f.r * 3 + f.g * 6 + f.b) / 10 > 150 ?
+                nk_rgb(14, 20, 24) : nk_rgb(255, 255, 255);
+            float w = selector->w, h = selector->h;
+            float pts[6];
+            pts[0] = selector->x + w * 0.25f; pts[1] = selector->y + h * 0.52f;
+            pts[2] = selector->x + w * 0.43f; pts[3] = selector->y + h * 0.70f;
+            pts[4] = selector->x + w * 0.76f; pts[5] = selector->y + h * 0.31f;
+            nk_stroke_polyline(out, pts, 3, NK_MAX(1.5f, h * 0.14f), nk_rgb_factor(tick, style->color_factor));
+        }
     }
 }
 NK_LIB void
@@ -25197,7 +25240,12 @@ nk_draw_option(struct nk_command_buffer *out,
 
     /* draw background and cursor */
     if (background->type == NK_STYLE_ITEM_COLOR) {
-        nk_fill_circle(out, *selector, nk_rgb_factor(style->border_color, style->color_factor));
+        /* selected (or hovered) ring takes the cursor colour instead of the
+         * neutral border colour */
+        struct nk_color ring = style->border_color;
+        if (cursor->type == NK_STYLE_ITEM_COLOR && (active || (state & NK_WIDGET_STATE_HOVER)))
+            ring = cursor->data.color;
+        nk_fill_circle(out, *selector, nk_rgb_factor(ring, style->color_factor));
         nk_fill_circle(out, nk_shrink_rect(*selector, style->border), nk_rgb_factor(background->data.color, style->color_factor));
     } else nk_draw_image(out, *selector, &background->data.image, nk_rgb_factor(nk_white, style->color_factor));
     if (active) {
