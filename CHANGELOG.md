@@ -16,6 +16,26 @@ a second release on the same day.
   `nk_draw_checkbox`, `nk_draw_option` and `nk_draw_symbol` in
   `third_party/nuklear.h`; the sizes and colours are set in the theme.
 
+### Added
+
+- CI (`.github/workflows/build.yml`): Linux build and tests, the Windows zip
+  (built in an Arch container with the same mingw-w64/UCRT toolchain as the
+  released `.exe`, import-checked, and started on a Windows runner) and a
+  universal macOS `.app` in a `.dmg` (macOS 11+, SDL2 built from source, tests
+  run natively, both slices started from the mounted image). Binaries are kept
+  as workflow artifacts; nothing is published.
+- `tools/mac/`: `build-sdl2.sh`, `build-universal.sh` and `make-app.sh`, which
+  CI uses and which build the same `.dmg` on a Mac.
+
+### Fixed
+
+- The macOS build did not compile (found by the first CI run): the sources
+  include `<SDL2/SDL.h>`, but `sdl2-config` only names `.../include/SDL2` and
+  Apple's compiler does not search Homebrew's prefix, so every file including
+  SDL failed. The Makefile now adds `<sdl2-config --prefix>/include` on macOS.
+- `tools/win/get-sdl2.sh` checks the SDL2 mingw SDK against a pinned SHA-256
+  (for the default version) instead of unpacking whatever it downloaded.
+
 ## [2026.09.17] — alpha, covering a track
 
 ### Added
