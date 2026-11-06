@@ -1,0 +1,194 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# CI: build and test on Linux, build the Windows and macOS binaries, and run
+# each of them once. Nothing here publishes a release; the artifacts are what
+# a release would attach.
+#
+#   linux          make + make test, with the system SDL2.
+#   windows        `make windows-dist` in an Arch container, so the toolchain
+#                  is the one the released .exe has always been built with
+#                  (mingw-w64 against the UCRT; Ubuntu's mingw-w64 defaults to
+#                  the old msvcrt). The zip is the artifact.
+#   windows-smoke  starts that .exe on a real Windows runner for a few seconds.
+#   macos          universal (arm64 + x86_64) .app in a .dmg, macOS 11.0+,
+#                  against an SDL2 built from source for that target. Runs
+#                  make test, then starts both slices from the mounted .dmg.
+#
+# The smoke runs cannot click, so they prove the program starts, stays up and
+# draws - not that it works. macOS is ad-hoc signed, not notarised.
+name: build
+
+on:
+  push:
+    branches: [master, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-dev
+
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make test
+
+  windows:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install the toolchain
+        # Newer pacman sandboxes downloads with Landlock, which a container on
+        # a runner may not have; retry without it rather than fail.
+        run: |
+          pkgs="base-devel git mingw-w64-gcc sdl2 zip curl"
+          pacman -Syu --noconfirm --needed $pkgs || {
+            sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+            pacman -Syu --noconfirm --needed $pkgs
+          }
+
+      - uses: actions/checkout@v4
+
+      - name: Fetch the SDL2 mingw SDK
+        run: tools/win/get-sdl2.sh
+
+      - name: Build and package
+        run: make windows-dist
+
+      - name: The executable may import only system DLLs and SDL2.dll
+        # A mingw-w64 that links the runtime dynamically (libwinpthread,
+        # libgcc) or against the old msvcrt would produce a zip that works
+        # here and fails on a clean Windows machine.
+        run: |
+          exe="$(ls dist/rapidgen-*-win64/rapidgen.exe)"
+          x86_64-w64-mingw32-objdump -p "$exe" | awk '/DLL Name/{print $3}' | sort -u | tee imports.txt
+          if grep -i -E '^(libgcc|libwinpthread|libstdc|msvcrt\.dll)' imports.txt; then
+            echo "unexpected runtime DLL in the import table" >&2; exit 1
+          fi
+          grep -qx 'SDL2.dll' imports.txt
+          ls dist/rapidgen-*-win64/SDL2.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rapidgen-windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows-smoke:
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rapidgen-windows-x64
+          path: pkg
+
+      - name: Run the executable
+        shell: pwsh
+        run: |
+          Get-ChildItem pkg\*.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath app }
+          $exe = (Get-ChildItem app -Recurse -Filter rapidgen.exe | Select-Object -First 1).FullName
+          Write-Host "starting $exe"
+          $p = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) { throw "rapidgen.exe exited with code $($p.ExitCode) within 8 s" }
+          New-Item -ItemType Directory -Force shots | Out-Null
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("shots\windows.png")
+          } catch { Write-Host "no screenshot: $_" }
+          Stop-Process $p
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-smoke-screenshots
+          path: shots/
+          if-no-files-found: ignore
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore SDL2 (universal, macOS 11.0 target)
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: build-mac-deps/prefix
+          key: mac-deps-${{ hashFiles('tools/mac/build-sdl2.sh') }}
+
+      - name: Build SDL2
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash tools/mac/build-sdl2.sh "$PWD/build-mac-deps/prefix"
+
+      - name: Save SDL2
+        # Saved here, not at the end of the job, so a later failure does not
+        # throw away the few minutes this took.
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-mac-deps/prefix
+          key: mac-deps-${{ hashFiles('tools/mac/build-sdl2.sh') }}
+
+      - name: Test
+        run: make test
+
+      - name: Build (arm64 and x86_64, joined with lipo)
+        run: bash tools/mac/build-universal.sh "$PWD/build-mac-deps/prefix" "$PWD/build-mac"
+
+      - name: Package .app and .dmg
+        run: bash tools/mac/make-app.sh "$PWD/build-mac-deps/prefix" "$PWD/build-mac/rapidgen"
+
+      - name: Run both slices from the .dmg
+        # Mounts the shipped .dmg, copies the app out and starts each slice for
+        # a few seconds (the Intel one under Rosetta on this arm64 runner). A
+        # crash fails the job.
+        run: |
+          mkdir -p shots
+          dmg="$(ls dist/rapidgen-*-macos-universal.dmg)"
+          mnt="$(hdiutil attach "$dmg" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
+          cp -R "$mnt/rapidgen.app" "$RUNNER_TEMP/"
+          hdiutil detach "$mnt"
+          exe="$RUNNER_TEMP/rapidgen.app/Contents/MacOS/rapidgen"
+          for arch in arm64 x86_64; do
+            arch -"$arch" "$exe" > "shots/stdout-$arch.txt" 2>&1 &
+            sleep 8
+            pgrep -x rapidgen >/dev/null || { echo "$arch slice is not running after 8 s" >&2; cat "shots/stdout-$arch.txt"; exit 1; }
+            screencapture -x "shots/$arch.png" || true
+            pkill -x rapidgen || true
+            sleep 2
+          done
+          cat shots/stdout-*.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rapidgen-macos-universal
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-smoke-screenshots
+          path: shots/
+          if-no-files-found: ignore

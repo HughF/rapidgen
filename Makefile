@@ -46,6 +46,13 @@ endif
 SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
 SDL_LIBS   := $(shell sdl2-config --libs 2>/dev/null)
 
+ifeq ($(UNAME),Darwin)
+    # The sources include <SDL2/SDL.h>, but sdl2-config only names
+    # .../include/SDL2, and Apple's compiler does not search Homebrew's prefix
+    # by itself.
+    SDL_CFLAGS += -I$(shell sdl2-config --prefix 2>/dev/null)/include
+endif
+
 # ---------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------

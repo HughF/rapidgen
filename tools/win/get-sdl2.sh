@@ -21,6 +21,17 @@ fi
 
 echo "fetching $URL"
 curl -fL --progress-bar -o "$DIR/$TAR" "$URL"
+
+# The default version is pinned by hash; any other is fetched unchecked.
+case "$VER" in
+    2.32.10) SHA=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2 ;;
+    *)       SHA= ;;
+esac
+if [ -n "$SHA" ] && ! echo "$SHA  $DIR/$TAR" | sha256sum -c -; then
+    rm -f "$DIR/$TAR"
+    echo "$TAR does not match its pinned SHA-256" >&2
+    exit 1
+fi
 tar xzf "$DIR/$TAR" -C "$DIR"
 rm -f "$DIR/$TAR"
 echo "unpacked $DIR/SDL2-$VER"
